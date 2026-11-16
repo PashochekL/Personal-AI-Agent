@@ -218,3 +218,17 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Personal-AI-Agent: local settings, secrets and runtime data
+.vscode/
+.idea/
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+credentials*.json
+workspace/
+.uv-cache/
+.uv-python/
+.uv-python-bin/
