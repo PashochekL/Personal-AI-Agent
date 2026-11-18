@@ -1,7 +1,7 @@
 # AI Agent — архитектура проекта и правила командной разработки
 
 **Версия:** 1.0  
-**Язык:** Python 3.12+  
+**Язык:** C# / .NET 10
 **Цель:** разработать персонального AI-ассистента с собственным агентным циклом, инструментами, памятью, несколькими интерфейсами и подключаемыми интеграциями.
 
 ## 1. Общая концепция
@@ -18,7 +18,7 @@
 6. **Sandbox** — безопасное исполнение команд.
 7. **Observability** — логирование, трассировка и учёт расходов.
 
-Все компоненты интегрируются через согласованные Python-интерфейсы и модели данных.
+Все компоненты интегрируются через согласованные C#-интерфейсы и модели данных.
 
 **Запрещается реализовывать собственные независимые агентные циклы внутри Telegram-бота, интеграций, памяти или других модулей.**
 
@@ -28,22 +28,22 @@
 
 | Компонент                | Технология                 |
 | ------------------------ | -------------------------- |
-| Язык                     | Python 3.12+               |
-| Backend                  | FastAPI                    |
-| Асинхронность            | asyncio                    |
-| Валидация данных         | Pydantic v2                |
+| Язык                     | C# / .NET 10               |
+| Backend                  | API backend                    |
+| Асинхронность            | Task и async/await                    |
+| Валидация данных         | валидация в shared                |
 | LLM Gateway              | LiteLLM Proxy              |
-| MCP                      | Официальный Python MCP SDK |
+| MCP                      | .NET SDK: выбор согласуется |
 | База данных              | PostgreSQL                 |
 | Векторный поиск          | pgvector                   |
-| Очередь задач            | Redis + arq                |
-| CLI                      | Python + Typer             |
-| Telegram                 | aiogram 3                  |
+| Очередь задач            | Redis: клиент согласуется                |
+| CLI                      | .NET: библиотека согласуется             |
+| Telegram                 | .NET: библиотека согласуется                  |
 | Песочница                | Docker                     |
 | Наблюдаемость            | OpenTelemetry + Langfuse   |
-| Тестирование             | pytest + pytest-asyncio    |
+| Тестирование             | .NET: библиотека согласуется    |
 | Контейнеризация          | Docker Compose             |
-| Управление зависимостями | uv                         |
+| Управление зависимостями | NuGet                      |
 
 Другие технологии допускаются только после согласования с командой.
 
@@ -99,7 +99,7 @@
 - поиск по сохранённой памяти;
 - CLI;
 - Telegram-бота;
-- общий FastAPI;
+- общий API backend;
 - Redis и очередь задач;
 - сохранение статусов выполнения задач.
 
@@ -124,50 +124,17 @@
 
 ```text
 personal-ai-agent/
-├── src/
-│   └── ai_agent/
-│       ├── core/
-│       │   ├── agent.py
-│       │   ├── tool_registry.py
-│       │   ├── context_manager.py
-│       │   ├── instructions.py
-│       │   └── mcp_client.py
-│       │
-│       ├── shared/
-│       │   ├── models.py
-│       │   ├── protocols.py
-│       │   ├── errors.py
-│       │   └── config.py
-│       │
-│       ├── gateway/
-│       ├── memory/
-│       ├── interfaces/
-│       │   ├── cli/
-│       │   ├── telegram/
-│       │   └── api/
-│       │
-│       ├── tools/
-│       │   ├── filesystem/
-│       │   ├── shell/
-│       │   └── integrations/
-│       │
-│       ├── sandbox/
-│       └── observability/
-│
-├── tests/
-│   ├── unit/
-│   └── integration/
-│
-├── skills/
-├── config/
-├── docker/
+├── src/ai_agent/
+│   ├── shared/             # общие контракты C#
+│   ├── core/               # будущий Agent Loop
+│   ├── gateway/ memory/ interfaces/ tools/ sandbox/ observability/
+├── tests/ContractTests/    # проверки общей основы
 ├── docs/
 ├── .env.example
-├── AGENTS.md
-├── docker-compose.yml
-├── pyproject.toml
 └── README.md
 ```
+
+Действующая общая основа реализована на C#. Остальные компоненты пока не реализованы.
 
 Каждый участник преимущественно работает со своими каталогами.
 
@@ -175,7 +142,7 @@ personal-ai-agent/
 
 ## 5. Основные контракты
 
-Все контракты реализуются через Python Protocol, Pydantic и асинхронные методы.
+Контракты реализуются через C#-интерфейсы, модели данных и асинхронные методы. Актуальные сигнатуры находятся в `src/ai_agent/shared/` и `docs/CONTRACTS.md`. Примеры ниже показывают сигнатуры C#; полные определения находятся в исходном коде.
 
 Ниже описаны согласуемые интерфейсы. Точные классы и поля фиксируем в `shared/` до начала интеграции компонентов.
 
@@ -183,15 +150,11 @@ personal-ai-agent/
 
 Ядро должно иметь возможность вызвать LLM независимо от конкретного провайдера.
 
-```python
-class LLMClient(Protocol):
-
-    async def complete(
-        self,
-        messages: list[Message],
-        tools: list[ToolDefinition],
-    ) -> LLMResponse:
-        ...
+```csharp
+public interface ILlmClient
+{
+    Task<LlmResponse> CompleteAsync(IReadOnlyList<Message> messages, IReadOnlyList<ToolDefinition> tools);
+}
 ```
 
 LLMResponse содержит:
@@ -213,29 +176,27 @@ Core не должен зависеть от формата ответов ко�
 
 Каждый инструмент должен реализовывать единый контракт.
 
-```python
-class Tool(Protocol):
-
-    name: str
-    description: str
-    parameters: dict
-
-    async def execute(
-        self,
-        arguments: dict,
-    ) -> ToolResult:
-        ...
+```csharp
+public interface ITool
+{
+    string Name { get; }
+    string Description { get; }
+    IReadOnlyDictionary<string, JsonElement> Parameters { get; }
+    Task<ToolResult> ExecuteAsync(IReadOnlyDictionary<string, JsonElement> arguments);
+}
 ```
 
 `parameters` описывает аргументы инструмента в формате JSON Schema.
 
 Результат ToolResult содержит:
 
-```python
-class ToolResult(BaseModel):
-    success: bool
-    content: str
-    error: str | None = None
+```csharp
+public sealed class ToolResult
+{
+    public required bool Success { get; init; }
+    public required string Content { get; init; }
+    public string? Error { get; init; }
+}
 ```
 
 Вызовы инструментов проходят через Tool Registry.
@@ -248,28 +209,13 @@ class ToolResult(BaseModel):
 
 Контракт хранилища истории:
 
-```python
-class ContextStore(Protocol):
-
-    async def get_messages(
-        self,
-        session_id: str,
-    ) -> list[Message]:
-        ...
-
-    async def append_message(
-        self,
-        session_id: str,
-        message: Message,
-    ) -> None:
-        ...
-
-    async def replace_messages(
-        self,
-        session_id: str,
-        messages: list[Message],
-    ) -> None:
-        ...
+```csharp
+public interface IContextStore
+{
+    Task<IReadOnlyList<Message>> GetMessagesAsync(string sessionId);
+    Task AppendMessageAsync(string sessionId, Message message);
+    Task ReplaceMessagesAsync(string sessionId, IReadOnlyList<Message> messages);
+}
 ```
 
 Core реализует алгоритм управления контекстом и compaction.
@@ -287,16 +233,11 @@ Memory реализует постоянное хранение истории.
 
 ### 5.4. SandboxExecutor
 
-```python
-class SandboxExecutor(Protocol):
-
-    async def execute(
-        self,
-        command: str,
-        workspace: str,
-        timeout: int = 30,
-    ) -> CommandResult:
-        ...
+```csharp
+public interface ISandboxExecutor
+{
+    Task<CommandResult> ExecuteAsync(string command, string workspace, int timeout = 30);
+}
 ```
 
 CommandResult содержит:
@@ -318,15 +259,11 @@ Core не запускает произвольные команды ОС нап
 
 Единая точка запуска агента:
 
-```python
-class Agent:
-
-    async def run(
-        self,
-        session_id: str,
-        user_message: str,
-    ) -> AgentResult:
-        ...
+```csharp
+public interface IAgent
+{
+    Task<AgentResult> RunAsync(string sessionId, string userMessage);
+}
 ```
 
 AgentResult содержит:
@@ -419,7 +356,7 @@ CLI не должен создавать независимую систему �
 CLI / Telegram
       |
       v
-   FastAPI
+   API backend
       |
       v
  Task Service
@@ -586,8 +523,8 @@ feature/github-integration
 Должны быть готовы:
 
 - структура проекта;
-- `shared/models.py`;
-- `shared/protocols.py`;
+- модели `shared/`;
+- интерфейсы `shared/`;
 - перечень инструментов;
 - контракт Agent;
 - контракт задачи и сессии.

@@ -232,3 +232,9 @@ workspace/
 .uv-cache/
 .uv-python/
 .uv-python-bin/
+
+# .NET build output and local SDK
+**/bin/
+**/obj/
+.dotnet/
+.dotnet-install.sh
