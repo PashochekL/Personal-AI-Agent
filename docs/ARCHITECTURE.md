@@ -126,7 +126,7 @@
 personal-ai-agent/
 ├── src/ai_agent/
 │   ├── shared/             # общие контракты C#
-│   ├── core/               # будущий Agent Loop
+│   ├── core/               # начальные Agent Loop и Tool Registry
 │   ├── gateway/ memory/ interfaces/ tools/ sandbox/ observability/
 ├── tests/ContractTests/    # проверки общей основы
 ├── docs/
@@ -134,7 +134,8 @@ personal-ai-agent/
 └── README.md
 ```
 
-Действующая общая основа реализована на C#. Остальные компоненты пока не реализованы.
+Общая основа и начальные Agent Loop и Tool Registry реализованы на C#.
+Остальные компоненты пока не реализованы.
 
 Каждый участник преимущественно работает со своими каталогами.
 
@@ -153,7 +154,7 @@ personal-ai-agent/
 ```csharp
 public interface ILlmClient
 {
-    Task<LlmResponse> CompleteAsync(IReadOnlyList<Message> messages, IReadOnlyList<ToolDefinition> tools);
+    Task<LlmResponse> CompleteAsync(IReadOnlyList<Message> messages, IReadOnlyList<ToolDefinition> tools, CancellationToken cancellationToken = default);
 }
 ```
 
@@ -182,7 +183,7 @@ public interface ITool
     string Name { get; }
     string Description { get; }
     IReadOnlyDictionary<string, JsonElement> Parameters { get; }
-    Task<ToolResult> ExecuteAsync(IReadOnlyDictionary<string, JsonElement> arguments);
+    Task<ToolResult> ExecuteAsync(IReadOnlyDictionary<string, JsonElement> arguments, CancellationToken cancellationToken = default);
 }
 ```
 
@@ -212,9 +213,9 @@ public sealed class ToolResult
 ```csharp
 public interface IContextStore
 {
-    Task<IReadOnlyList<Message>> GetMessagesAsync(string sessionId);
-    Task AppendMessageAsync(string sessionId, Message message);
-    Task ReplaceMessagesAsync(string sessionId, IReadOnlyList<Message> messages);
+    Task<IReadOnlyList<Message>> GetMessagesAsync(string sessionId, CancellationToken cancellationToken = default);
+    Task AppendMessageAsync(string sessionId, Message message, CancellationToken cancellationToken = default);
+    Task ReplaceMessagesAsync(string sessionId, IReadOnlyList<Message> messages, CancellationToken cancellationToken = default);
 }
 ```
 
@@ -236,7 +237,7 @@ Memory реализует постоянное хранение истории.
 ```csharp
 public interface ISandboxExecutor
 {
-    Task<CommandResult> ExecuteAsync(string command, string workspace, int timeout = 30);
+    Task<CommandResult> ExecuteAsync(string command, string workspace, int timeout = 30, CancellationToken cancellationToken = default);
 }
 ```
 
@@ -262,7 +263,7 @@ Core не запускает произвольные команды ОС нап
 ```csharp
 public interface IAgent
 {
-    Task<AgentResult> RunAsync(string sessionId, string userMessage);
+    Task<AgentResult> RunAsync(string sessionId, string userMessage, CancellationToken cancellationToken = default);
 }
 ```
 
@@ -274,6 +275,12 @@ AgentResult содержит:
 - `error`, если выполнение завершилось ошибкой.
 
 Новые интерфейсы пользователя должны обращаться к этому методу через сервис выполнения задач, а не реализовывать собственную агентную логику.
+
+Асинхронные операции принимают необязательный `CancellationToken` и должны
+кооперативно реагировать на отмену. Запрошенная отмена Agent.run возвращает
+статус CANCELLED. Передача токена сама по себе не гарантирует остановку
+операции, если реализация его игнорирует. Правила восстановления частично
+записанной истории и отмены процессов песочницы согласуются отдельно.
 
 ## 6. Правила Agent Loop
 
