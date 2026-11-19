@@ -1,0 +1,56 @@
+using System.Text.Json;
+using System.Text.Json.Nodes;
+using AiAgent.Shared;
+using Json.Schema;
+
+namespace AiAgent.Core;
+
+/// <summary>Stores tool definitions and validates calls before execution.</summary>
+public sealed class ToolRegistry
+{
+    private sealed record Registration(ITool Tool, ToolDefinition Definition, JsonSchema Schema);
+    private readonly Dictionary<string, Registration> _tools = new(StringComparer.Ordinal);
+
+    public void Register(ITool tool)
+    {
+        ArgumentNullException.ThrowIfNull(tool);
+        if (string.IsNullOrWhiteSpace(tool.Name)) throw new ArgumentException("Tool name must not be blank");
+        if (_tools.ContainsKey(tool.Name)) throw new ArgumentException("Tool name is already registered");
+        var parameters = tool.Parameters.ToDictionary(pair => pair.Key, pair => pair.Value.Clone());
+        var schema = JsonSchema.FromText(JsonSerializer.Serialize(parameters));
+        var definition = new ToolDefinition { Name = tool.Name, Description = tool.Description, Parameters = parameters };
+        definition.Validate();
+        _tools.Add(tool.Name, new Registration(tool, definition, schema));
+    }
+
+    public IReadOnlyList<ToolDefinition> Definitions() => _tools.Values.Select(entry => new ToolDefinition
+    {
+        Name = entry.Definition.Name,
+        Description = entry.Definition.Description,
+        Parameters = entry.Definition.Parameters.ToDictionary(pair => pair.Key, pair => pair.Value.Clone())
+    }).ToArray();
+
+    public async Task<ToolResult> ExecuteAsync(ToolCall call, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        call.Validate();
+        if (!_tools.TryGetValue(call.Name, out var entry)) return Failure("Unknown tool");
+        try
+        {
+            var arguments = JsonSerializer.SerializeToNode(call.Arguments);
+            if (!entry.Schema.Evaluate(arguments).IsValid) return Failure("Invalid tool arguments");
+        }
+        catch (Exception) { return Failure("Tool schema evaluation failed"); }
+        try
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var result = await entry.Tool.ExecuteAsync(call.Arguments, cancellationToken);
+            result.Validate();
+            return result;
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception) { return Failure("Tool execution failed"); }
+    }
+
+    private static ToolResult Failure(string error) => new() { Success = false, Content = "", Error = error };
+}
