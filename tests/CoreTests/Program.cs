@@ -61,9 +61,16 @@ Check(result.Status == Status.FAILED && result.Error!.Contains("limit") && store
 result = await new Agent(new Model(new LlmResponse { ToolCalls = [Call("1"), Call("1")] }), new Store(), Registry()).RunAsync("s", "go");
 Check(result.Status == Status.FAILED && result.Error!.Contains("Duplicate"), "duplicate calls");
 store = new Store();
+store.Messages.Add(new Message { Role = "assistant", ToolCalls = [Call("1"), Call("2")] });
+store.Messages.Add(new Message { Role = "tool", ToolCallId = "1", Content = "already completed" });
+model = new Model(new LlmResponse { Content = "continuing" });
+result = await new Agent(model, store, Registry()).RunAsync("s", "go");
+Check(result.Status == Status.COMPLETED && store.Messages[1].Content == "already completed" && store.Messages[2].ToolCallId == "2" && store.Messages[2].Content!.Contains("outcome is unknown") && model.Requests[0].Any(m => m.Content?.Contains("Do not assume success") == true), "interrupted calls repaired without repeating completed or missing tools");
+store = new Store();
 store.Messages.Add(new Message { Role = "assistant", ToolCalls = [Call("1")] });
+store.Messages.Add(new Message { Role = "user", Content = "out of order" });
 result = await new Agent(new Model(), store, Registry()).RunAsync("s", "go");
-Check(result.Status == Status.FAILED && store.Messages.Count == 1, "incomplete history");
+Check(result.Status == Status.FAILED && store.Messages.Count == 2, "corrupt nonterminal history not repaired");
 result = await new Agent(new Model(new LlmResponse { Content = "partial", FinishReason = "length" }), new Store(), Registry()).RunAsync("s", "go");
 Check(result.Status == Status.FAILED, "truncated response");
 var registry = Registry();
@@ -101,6 +108,9 @@ using (var cancelled = new CancellationTokenSource())
     result = await run.WaitAsync(TimeSpan.FromSeconds(5));
     Check(result.Status == Status.CANCELLED && slow.Stopped && store.Messages.Count == 2,
         "cancel reaches running tool and prevents subsequent calls");
+    var recoveryModel = new Model(new LlmResponse { Content = "continued" });
+    var recovered = await new Agent(recoveryModel, store, registry).RunAsync("s", "continue");
+    Check(recovered.Status == Status.COMPLETED && store.Messages.Count(m => m.Role == "tool" && m.Content!.Contains("outcome is unknown")) == 2 && recoveryModel.Requests[0].Count(m => m.Role == "tool") == 2, "cancelled batch can continue with unknown results without rerunning tools");
 }
 
 registry = new ToolRegistry();

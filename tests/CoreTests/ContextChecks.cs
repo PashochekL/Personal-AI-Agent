@@ -87,6 +87,27 @@ static class ContextChecks
         var chunkModel = new Model(Enumerable.Range(0, 20).Select(_ => new LlmResponse { Content = "short summary" }).ToArray());
         var chunked = await window.PrepareAsync(chunkModel, [hugeOld, shortCurrent], shortCurrent, null, []);
         Check(chunkModel.Requests.Count > 1 && ReferenceEquals(chunked[^1], shortCurrent), "large historical turn split into fragments without changing current request");
+        var longHistory = new List<Message> { system };
+        for (var i = 0; i < 35; i++)
+        {
+            longHistory.Add(new Message { Role = "user", Content = $"turn {i}: " + new string('x', 900) });
+            if (i % 4 == 0)
+            {
+                var id = $"long-{i}";
+                longHistory.Add(new Message { Role = "assistant", ToolCalls = [new ToolCall { Id = id, Name = "test", Arguments = new Dictionary<string, JsonElement>() }] });
+                longHistory.Add(new Message { Role = "tool", ToolCallId = id, Content = "tool result" });
+            }
+            longHistory.Add(new Message { Role = "assistant", Content = "response " + i });
+        }
+        longHistory.Add(shortCurrent);
+        Task<int> RealisticCounter(IReadOnlyList<Message> messages, IReadOnlyList<ToolDefinition> _, CancellationToken __) => Task.FromResult(JsonSerializer.Serialize(messages).Length / 4);
+        var longCache = new MemorySummaryCache();
+        var longWindow = new ContextWindow(6000, RealisticCounter, longCache);
+        var longModel = new Model(Enumerable.Range(0, 100).Select(i => new LlmResponse { Content = "concise summary " + i }).ToArray());
+        var longResult = await longWindow.PrepareAsync(longModel, longHistory, shortCurrent, null, [], sessionId: "long");
+        var summaryCalls = longModel.Requests.Count;
+        var again = await longWindow.PrepareAsync(longModel, longHistory, shortCurrent, null, [], sessionId: "long");
+        Check(summaryCalls > 1 && longModel.Requests.Count == summaryCalls && ReferenceEquals(longResult[0], system) && ReferenceEquals(again[^1], shortCurrent), "long multi-turn history is chunked and cached");
         var small = new Message { Role = "user", Content = "hello" };
         var emptyModel = new Model();
         var untouched = await window.PrepareAsync(emptyModel, [small], small, null, []);

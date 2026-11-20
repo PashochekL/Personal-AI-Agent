@@ -81,6 +81,32 @@ public sealed class Agent : IAgent
         public Task<LlmResponse> CompleteAsync(IReadOnlyList<Message> messages, IReadOnlyList<ToolDefinition> tools, CancellationToken cancellationToken = default) => throw new SummaryUnavailableException();
     }
 
+    // Only repair a final incomplete group. Never repeat a tool: it may already
+    // have changed external state before its result could be persisted.
+    private async Task<HashSet<string>> RepairInterruptedCallsAsync(string sessionId, List<Message> messages, CancellationToken cancellationToken)
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var pending = new HashSet<string>(StringComparer.Ordinal);
+        IReadOnlyList<ToolCall> lastCalls = [];
+        foreach (var message in messages)
+        {
+            message.Validate();
+            if (pending.Count > 0 && message.Role != "tool") throw new ContextLimitException("Incomplete tool history");
+            if (message.ToolCalls.Count > 0) lastCalls = message.ToolCalls;
+            foreach (var call in message.ToolCalls)
+                if (!seen.Add(call.Id) || !pending.Add(call.Id)) throw new ContextLimitException("Duplicate tool call ID");
+            if (message.Role == "tool" && !pending.Remove(message.ToolCallId!)) throw new ContextLimitException("Invalid tool history");
+        }
+        foreach (var call in lastCalls.Where(call => pending.Contains(call.Id)))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var repair = new Message { Role = "tool", ToolCallId = call.Id, Content = "Error: Tool execution was interrupted before its result was saved. Its outcome is unknown; it may have changed state. Do not assume success or failure and do not repeat it automatically. Inform the user and check the current state before further actions." };
+            await _store.AppendMessageAsync(sessionId, repair, cancellationToken);
+            messages.Add(repair);
+        }
+        return seen;
+    }
+
     /// <summary>Precomputes a reusable summary without modifying the stored conversation.</summary>
     public async Task<bool> CompactAsync(string sessionId, CancellationToken cancellationToken = default)
     {
@@ -88,17 +114,7 @@ public sealed class Agent : IAgent
         if (!_contextWindow.CanSaveSummary) throw new ContextLimitException("Хранилище краткого содержания не настроено.");
         var history = (await _store.GetMessagesAsync(sessionId, cancellationToken)).ToList();
         if (history.Count == 0) return false;
-        var pending = new HashSet<string>(StringComparer.Ordinal);
-        var seen = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var message in history)
-        {
-            message.Validate();
-            if (pending.Count > 0 && message.Role != "tool") throw new ContextLimitException("История содержит незавершённый вызов инструмента.");
-            foreach (var call in message.ToolCalls)
-                if (!seen.Add(call.Id) || !pending.Add(call.Id)) throw new ContextLimitException("История содержит повторный вызов инструмента.");
-            if (message.Role == "tool" && !pending.Remove(message.ToolCallId!)) throw new ContextLimitException("История содержит неверный результат инструмента.");
-        }
-        if (pending.Count > 0) throw new ContextLimitException("История содержит незавершённый вызов инструмента.");
+        await RepairInterruptedCallsAsync(sessionId, history, cancellationToken);
         var marker = new Message { Role = "user", Content = "Подготовка контекста для следующего запроса." };
         var request = new List<Message>();
         if (_systemPrompt is not null) request.Add(new Message { Role = "system", Content = _systemPrompt });
@@ -119,21 +135,8 @@ public sealed class Agent : IAgent
             cancellationToken.ThrowIfCancellationRequested();
             var messages = (await _store.GetMessagesAsync(sessionId, cancellationToken)).ToList();
             cancellationToken.ThrowIfCancellationRequested();
-            var seen = new HashSet<string>(StringComparer.Ordinal);
-            var pending = new HashSet<string>(StringComparer.Ordinal);
+            var seen = await RepairInterruptedCallsAsync(sessionId, messages, cancellationToken);
             var presentedInstructions = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var message in messages)
-            {
-                message.Validate();
-                if (pending.Count > 0 && message.Role != "tool") return Fail("Incomplete tool history");
-                foreach (var call in message.ToolCalls)
-                {
-                    if (!seen.Add(call.Id)) return Fail("Duplicate tool call ID");
-                    pending.Add(call.Id);
-                }
-                if (message.Role == "tool" && !pending.Remove(message.ToolCallId!)) return Fail("Invalid tool history");
-            }
-            if (pending.Count > 0) return Fail("Incomplete tool history");
             var projectContext = await LoadProjectContextAsync(cancellationToken);
             var user = new Message { Role = "user", Content = userMessage };
             messages.Add(user);
@@ -179,7 +182,7 @@ public sealed class Agent : IAgent
                                 if (instructions.Count > 0 && !presentedInstructions.Contains(digest))
                                 {
                                     newlyPresented.Add(digest);
-                                    result = new ToolResult { Success = false, Content = text, Error = "Read applicable project instructions below, then retry the file operation. They do not override higher-priority instructions." };
+                                    result = new ToolResult { Success = false, Content = text, Error = "Read applicable project instructions below, then retry the file operation. More deeply nested AGENTS.md instructions take precedence over conflicting parent instructions in their directory. They do not override higher-priority instructions." };
                                 }
                                 else result = await _tools.ExecuteAsync(call, cancellationToken);
                             }
