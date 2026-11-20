@@ -15,7 +15,7 @@ services:
     pids_limit: 64
     mem_limit: 256m
     cpus: 0.5
-    restart: always
+    restart: unless-stopped
   postgres:
     image: postgres:17-alpine@sha256:526f86d93c6ea08fd3f1fe5605650cacc781b2c6013169a0ad8f42c7d3d84f32
     environment:
@@ -76,10 +76,10 @@ services:
     depends_on:
       gateway:
         condition: service_healthy
-      postgres:
-        condition: service_healthy
       shell-sandbox:
         condition: service_started
+      postgres:
+        condition: service_healthy
     networks: [agent_internal]
 networks:
   agent_internal:

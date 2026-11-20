@@ -5,7 +5,7 @@ using AiAgent.Shared;
 
 namespace AiAgent.Sandbox;
 
-/// <summary>Connects to a single-command, network-isolated worker over a Unix socket.</summary>
+/// <summary>Connects to a persistent, network-isolated worker over a Unix socket.</summary>
 public sealed class UnixSandboxExecutor(string socketPath = "/sandbox-ipc/sandbox.sock") : ISandboxExecutor
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
@@ -25,7 +25,6 @@ public sealed class UnixSandboxExecutor(string socketPath = "/sandbox-ipc/sandbo
                 cancellationToken.ThrowIfCancellationRequested();
                 var candidate = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
                 try { await candidate.ConnectAsync(new UnixDomainSocketEndPoint(socketPath), cancellationToken); connected = candidate; break; }
-                // Docker increases restart backoff after many rapid commands (up to about a minute).
                 catch (SocketException) when (elapsed.Elapsed < TimeSpan.FromSeconds(75)) { candidate.Dispose(); await Task.Delay(200, cancellationToken); }
                 catch { candidate.Dispose(); throw; }
             }
@@ -47,7 +46,7 @@ public sealed class UnixSandboxExecutor(string socketPath = "/sandbox-ipc/sandbo
             using var closeTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             closeTimeout.CancelAfter(TimeSpan.FromSeconds(5));
             try { await reader.ReadAsync(one.AsMemory(), closeTimeout.Token); }
-            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { throw new AgentError("Sandbox worker did not stop"); }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { throw new AgentError("Sandbox connection did not close"); }
             return result;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }

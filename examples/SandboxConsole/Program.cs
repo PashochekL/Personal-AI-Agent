@@ -48,6 +48,14 @@ if (contextBudgetText is not null && (!int.TryParse(contextBudgetText, out conte
     return 1;
 }
 const string personality = """
+В обычной непринуждённой беседе твой характер заметен в каждом ответе, в том
+числе на «привет», бессмыслицу и «как дела»: коротко и с нахальной подколкой
+именно собеседника. Не отвечай нейтральным приветствием, «нормально, спасибо»,
+встречным вежливым вопросом или просто пересказом сообщения пользователя.
+Никаких примирительных добавлений после подколки. Например: «Опять ты? Чего
+тебе?» или «Лучше, чем у тебя, судя по твоим вопросам». Придумывай разные фразы,
+а не повторяй эти примеры. При просьбе о помощи после подколки переходи к делу.
+
 Ты — Дамир, персональный ИИ-ассистент с характером наглого, самоуверенного
 острослова. Отвечай по-русски, если пользователь не выбрал другой язык. Общайся
 откровенно грубовато, нахально и язвительно: подкалывай пользователя, ехидно
@@ -76,8 +84,7 @@ const string personality = """
 Не повторяй примеры дословно каждый раз, подстраивай обращение под пользователя
 и не вставляй шутку в каждое предложение.
 Сначала действительно помогай: решение должно быть понятным и точным. Не переходи
-к травле, унижению или агрессии; если пользователь просит сменить тон, послушай его.
-В серьёзных и чувствительных ситуациях говори бережно и без сарказма. Честно
+к травле, унижению или агрессии. Честно
 сообщай об ошибках и результатах инструментов, не выдумывай выполненные действия.
 История этого диалога сохраняется в локальной базе между запусками; при сжатии
 часть старых сообщений может передаваться тебе в пересказе, который не гарантирует
@@ -110,18 +117,13 @@ int activeBudget = contextBudget;
 void ShowTokens()
 {
     var statistics = usage.Snapshot();
-    Console.WriteLine($"Токены за этот диалог: всего {statistics.Total}, входных {statistics.Input}, выходных {statistics.Output}.");
-    if (statistics.MissingUsageResponses > 0) Console.WriteLine($"Шлюз не вернул полный расход для {statistics.MissingUsageResponses} ответ(ов), поэтому итог может быть неполным.");
-    Console.WriteLine("Включены ответы и запросы на сжатие; это не расход всей подписки.");
+    Console.WriteLine($"{(statistics.MissingUsageResponses > 0 ? "≥" : "")}{statistics.Total}");
 }
 async Task ShowContextAsync(Agent currentAgent)
 {
     var estimate = await currentAgent.EstimateContextAsync(sessionId, stop.Token);
-    Console.WriteLine($"Текущий контекст: примерно {estimate.Tokens} токенов — около {100.0 * estimate.Tokens / activeBudget:F1}% рабочего бюджета {activeBudget}.");
-    if (estimate.UsesSavedSummary) Console.WriteLine("Учтён сохранённый пересказ истории.");
-    if (estimate.SummaryUnavailable) Console.WriteLine("Показана полная история: перед следующим ответом может потребоваться сжатие.");
-    Console.WriteLine("В оценку входят инструкции и инструменты; текст следующего сообщения ещё не учтён.");
-    if (modelInputLimit is int limit) Console.WriteLine($"[Справочный лимит входа модели по данным шлюза: {limit}; для подписки ChatGPT он может отличаться.]");
+    if (estimate.SummaryUnavailable) throw new ContextLimitException("Не удалось оценить сжатый контекст.");
+    Console.WriteLine($"{100.0 * estimate.Tokens / activeBudget:F1}%");
 }
 async Task<Agent> CreateAgentAsync(string model)
 {
@@ -130,16 +132,7 @@ async Task<Agent> CreateAgentAsync(string model)
     tools.Register(new WriteFileTool(workspace));
     tools.Register(new EditFileTool(workspace));
     tools.Register(new ListDirectoryTool(workspace));
-    tools.Register(new ShellTool(new UnixSandboxExecutor(), async (command, timeout, cancellationToken) =>
-    {
-        Console.WriteLine($"Дамир предлагает выполнить команду в песочнице (таймаут {timeout} сек.):");
-        Console.WriteLine(JsonSerializer.Serialize(command));
-        Console.Write("Команда может менять файлы workspace. Разрешить? [да/нет]: ");
-        var answer = await Console.In.ReadLineAsync(cancellationToken);
-        var allowed = string.Equals(answer?.Trim(), "да", StringComparison.OrdinalIgnoreCase);
-        if (allowed) Console.WriteLine("Готовлю песочницу. После серии быстрых команд это может занять до минуты.");
-        return allowed;
-    }));
+    tools.Register(new ShellTool(new UnixSandboxExecutor()));
     var client = new LiteLlmClient(http, new Uri("http://gateway:4000"), proxyKey, model);
     modelInputLimit = await client.GetInputLimitAsync(stop.Token);
     activeBudget = modelInputLimit is > 0 ? Math.Min(contextBudget, Math.Min(128000, Math.Max(4096, (int)(modelInputLimit.Value * 0.7)))) : Math.Min(contextBudget, 64000);
@@ -152,7 +145,7 @@ try { selected = await ChooseModelAsync(useDefault: true); }
 catch (OperationCanceledException) when (stop.IsCancellationRequested) { return 0; }
 if (selected is null) return 1;
 var agent = await CreateAgentAsync(selected);
-Console.WriteLine($"Дамир готов. Модель: {selected}. Команды: /models, /tokens, /context, /compact, /exit.");
+Console.WriteLine($"Дамир готов. Модель: {selected}. Команды: /help, /models, /tokens, /context, /compress, /exit.");
 while (!stop.IsCancellationRequested)
 {
     Console.Write("> ");
@@ -160,6 +153,11 @@ while (!stop.IsCancellationRequested)
     try { input = await Console.In.ReadLineAsync(stop.Token); }
     catch (OperationCanceledException) when (stop.IsCancellationRequested) { break; }
     if (input is null || input.Trim() == "/exit") break;
+    if (input.Trim() == "/help")
+    {
+        Console.WriteLine("/help — команды\n/models — выбор модели\n/tokens — потраченные токены\n/context — заполнение контекста\n/compress — сжать контекст\n/exit — выход");
+        continue;
+    }
     if (input.Trim() == "/tokens") { ShowTokens(); continue; }
     if (input.Trim() == "/context")
     {
@@ -169,9 +167,9 @@ while (!stop.IsCancellationRequested)
         { Console.Error.WriteLine(e is ContextLimitException ? e.Message : "Не удалось оценить текущий контекст."); }
         continue;
     }
-    if (input.Trim() == "/compact")
+    if (input.Trim() == "/compress")
     {
-        try { Console.WriteLine(await agent.CompactAsync(sessionId, stop.Token) ? "История сжата; исходный диалог сохранён." : "История пока пуста."); }
+        try { Console.WriteLine(await agent.CompactAsync(sessionId, stop.Token) ? "Готово." : "История пока пуста."); }
         catch (OperationCanceledException) when (stop.IsCancellationRequested) { break; }
         catch (Exception e) when (e is AgentError or ContextLimitException or NpgsqlException) { Console.Error.WriteLine("Не удалось сжать историю: " + (e is ContextLimitException ? e.Message : "ошибка шлюза или хранилища")); }
         continue;
@@ -186,6 +184,11 @@ while (!stop.IsCancellationRequested)
         selected = choice;
         agent = await CreateAgentAsync(selected);
         Console.WriteLine($"Выбрана модель: {selected}");
+        continue;
+    }
+    if (input.TrimStart().StartsWith('/'))
+    {
+        Console.WriteLine("Такой команды не знаю. Опять пальцы быстрее мыслей? Глянь /help.");
         continue;
     }
     AgentResult result;

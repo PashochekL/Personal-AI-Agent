@@ -15,16 +15,16 @@ public sealed class LiteLlmClient : ILlmClient
     private readonly Uri _modelsEndpoint;
     private readonly Uri _countEndpoint;
     private readonly Uri _modelInfoEndpoint;
-    private readonly string _apiKey;
+    private readonly string? _apiKey;
     private readonly string _model;
 
-    public LiteLlmClient(HttpClient http, Uri proxyBaseUrl, string apiKey, string model)
+    public LiteLlmClient(HttpClient http, Uri proxyBaseUrl, string? apiKey, string model)
     {
         ArgumentNullException.ThrowIfNull(http);
         ArgumentNullException.ThrowIfNull(proxyBaseUrl);
         if (!proxyBaseUrl.IsAbsoluteUri || proxyBaseUrl.Scheme is not ("http" or "https") || !string.IsNullOrEmpty(proxyBaseUrl.UserInfo)) throw new ArgumentException("Invalid proxy URL");
         if (proxyBaseUrl.Host.Equals("api.openai.com", StringComparison.OrdinalIgnoreCase)) throw new ArgumentException("A LiteLLM proxy URL is required");
-        ArgumentException.ThrowIfNullOrWhiteSpace(apiKey);
+        if (apiKey is not null) ArgumentException.ThrowIfNullOrWhiteSpace(apiKey);
         ArgumentException.ThrowIfNullOrWhiteSpace(model);
         _http = http;
         _endpoint = new Uri(proxyBaseUrl.ToString().TrimEnd('/') + "/chat/completions");
@@ -53,7 +53,7 @@ public sealed class LiteLlmClient : ILlmClient
         try
         {
             using var request = new HttpRequestMessage(HttpMethod.Post, _countEndpoint) { Content = JsonContent.Create(new { model = _model, messages = WireMessages(messages), tools = WireTools(tools) }) };
-            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _apiKey);
+            if (_apiKey is not null) request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _apiKey);
             using var response = await _http.SendAsync(request, cancellationToken);
             if (!response.IsSuccessStatusCode) throw new AgentError($"Token counter returned HTTP {(int)response.StatusCode}");
             using var json = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(cancellationToken), cancellationToken: cancellationToken);
@@ -73,7 +73,7 @@ public sealed class LiteLlmClient : ILlmClient
         try
         {
             using var request = new HttpRequestMessage(HttpMethod.Get, _modelInfoEndpoint);
-            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _apiKey);
+            if (_apiKey is not null) request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _apiKey);
             using var response = await _http.SendAsync(request, cancellationToken);
             if (!response.IsSuccessStatusCode) return null;
             using var json = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(cancellationToken), cancellationToken: cancellationToken);
@@ -89,7 +89,7 @@ public sealed class LiteLlmClient : ILlmClient
         try
         {
             using var request = new HttpRequestMessage(HttpMethod.Get, _modelsEndpoint);
-            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _apiKey);
+            if (_apiKey is not null) request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _apiKey);
             using var response = await _http.SendAsync(request, cancellationToken);
             if (!response.IsSuccessStatusCode) throw new AgentError($"LLM gateway returned HTTP {(int)response.StatusCode}");
             using var json = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(cancellationToken), cancellationToken: cancellationToken);
@@ -116,7 +116,7 @@ public sealed class LiteLlmClient : ILlmClient
             var payload = new Dictionary<string, object?> { ["model"] = _model, ["messages"] = wireMessages };
             if (tools.Count > 0) payload["tools"] = WireTools(tools);
             using var request = new HttpRequestMessage(HttpMethod.Post, _endpoint) { Content = JsonContent.Create(payload) };
-            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _apiKey);
+            if (_apiKey is not null) request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _apiKey);
             using var response = await _http.SendAsync(request, cancellationToken);
             if (!response.IsSuccessStatusCode) throw new AgentError($"LLM gateway returned HTTP {(int)response.StatusCode}");
             using var json = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(cancellationToken), cancellationToken: cancellationToken);

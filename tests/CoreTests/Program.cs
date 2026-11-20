@@ -68,6 +68,10 @@ result = await new Agent(new Model(new LlmResponse { Content = "partial", Finish
 Check(result.Status == Status.FAILED, "truncated response");
 var registry = Registry();
 try { registry.Register(new Echo()); throw new Exception("duplicate tool accepted"); } catch (ArgumentException) { checks++; }
+try { registry.RegisterRange([new NamedEcho("new-tool"), new Echo()]); throw new Exception("duplicate batch accepted"); }
+catch (ArgumentException) { Check(registry.Definitions().All(x => x.Name != "new-tool"), "duplicate in batch leaves registry unchanged"); }
+try { registry.RegisterRange([new NamedEcho("same"), new NamedEcho("same")]); throw new Exception("duplicate batch names accepted"); }
+catch (ArgumentException) { Check(registry.Definitions().All(x => x.Name != "same"), "duplicates within batch leave registry unchanged"); }
 Check((await registry.ExecuteAsync(Call("x", arguments: "{}"))).Success == false, "required argument");
 Check((await registry.ExecuteAsync(Call("x", arguments: "{\"text\":\"ok\",\"extra\":true}"))).Success == false, "additional properties");
 registry = new ToolRegistry();
@@ -135,6 +139,13 @@ sealed class Echo : ITool
     public string Description => "Echo text";
     public IReadOnlyDictionary<string, JsonElement> Parameters { get; } = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>("""{"type":"object","properties":{"text":{"type":"string"}},"required":["text"],"additionalProperties":false}""")!;
     public Task<ToolResult> ExecuteAsync(IReadOnlyDictionary<string, JsonElement> arguments, CancellationToken cancellationToken = default) => Task.FromResult(new ToolResult { Success = true, Content = arguments["text"].GetString()! });
+}
+sealed class NamedEcho(string name) : ITool
+{
+    public string Name => name;
+    public string Description => "Echo";
+    public IReadOnlyDictionary<string, JsonElement> Parameters => new Echo().Parameters;
+    public Task<ToolResult> ExecuteAsync(IReadOnlyDictionary<string, JsonElement> arguments, CancellationToken cancellationToken = default) => new Echo().ExecuteAsync(arguments, cancellationToken);
 }
 sealed class AdjustableClock : TimeProvider
 {
