@@ -1,0 +1,48 @@
+services:
+  gateway:
+    image: ghcr.io/berriai/litellm@sha256:679c95daabea3e8775d42c744e6771b8a8cb47b3ea046ab9fb6c9deeb35d3dc3
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    environment:
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:?Set LITELLM_MASTER_KEY in .env}
+      CHATGPT_TOKEN_DIR: /tokens/chatgpt
+    volumes:
+      - ./config/litellm.yaml:/app/config.yaml:ro
+      - damir_auth:/tokens/chatgpt
+    networks: [agent_internal, gateway_egress]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:4000/health/liveliness', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 45s
+    restart: unless-stopped
+  agent:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.sandbox
+    environment:
+      LITELLM_API_KEY: ${LITELLM_MASTER_KEY:?Set LITELLM_MASTER_KEY in .env}
+      DEFAULT_MODEL: ${DEFAULT_MODEL:-gpt-6.1-sol}
+    volumes:
+      - ./workspace:/workspace
+    working_dir: /workspace
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    mem_limit: 512m
+    cpus: 1.0
+    stdin_open: true
+    tty: true
+    depends_on:
+      gateway:
+        condition: service_healthy
+    networks: [agent_internal]
+networks:
+  agent_internal:
+    internal: true
+  gateway_egress: {}
+volumes:
+  damir_auth: {}
