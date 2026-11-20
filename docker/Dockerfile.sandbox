@@ -3,11 +3,13 @@ WORKDIR /source
 COPY src/ai_agent/shared/ src/ai_agent/shared/
 COPY src/ai_agent/core/ src/ai_agent/core/
 COPY src/ai_agent/gateway/ src/ai_agent/gateway/
+COPY src/ai_agent/sandbox/ src/ai_agent/sandbox/
 COPY src/ai_agent/tools/ src/ai_agent/tools/
 COPY examples/SandboxConsole/ examples/SandboxConsole/
 RUN dotnet publish examples/SandboxConsole/SandboxConsole.csproj -c Release -o /app
 
 FROM mcr.microsoft.com/dotnet/runtime:10.0
+RUN apt-get update && apt-get install -y --no-install-recommends libgssapi-krb5-2 && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=build /app/ ./
 USER 65532:65532

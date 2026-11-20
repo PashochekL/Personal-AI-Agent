@@ -21,6 +21,12 @@ if [ ! -s "$key_file" ]; then
 fi
 LITELLM_MASTER_KEY=$(cat "$key_file")
 export LITELLM_MASTER_KEY
+db_key_file=.uv-cache/damir-db-password
+if [ ! -s "$db_key_file" ]; then
+  openssl rand -hex 32 > "$db_key_file"
+fi
+DAMIR_POSTGRES_PASSWORD=$(cat "$db_key_file")
+export DAMIR_POSTGRES_PASSWORD
 
 case "${1:-auth-check}" in
   auth-check|login)
