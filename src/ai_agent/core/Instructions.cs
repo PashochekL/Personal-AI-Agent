@@ -84,8 +84,17 @@ public sealed class SkillCatalog(Workspace workspace)
         ValidateName(name);
         if (name != directory) throw new ArgumentException("Skill name must match directory");
         if (string.IsNullOrWhiteSpace(description) || description.Length > 1024) throw new ArgumentException("Invalid skill description");
-        var compatibility = Field("compatibility");
-        if (compatibility is not null && (string.IsNullOrWhiteSpace(compatibility) || compatibility.Length > 500)) throw new ArgumentException("Invalid skill compatibility");
+        if (map.Children.TryGetValue(new YamlScalarNode("compatibility"), out var compatibilityNode))
+        {
+            if (compatibilityNode is not YamlScalarNode compatibility || string.IsNullOrWhiteSpace(compatibility.Value) || compatibility.Value.Length > 500)
+                throw new ArgumentException("Invalid skill compatibility");
+        }
+        foreach (var key in new[] { "license", "allowed-tools" })
+            if (map.Children.TryGetValue(new YamlScalarNode(key), out var value) && (value is not YamlScalarNode scalar || scalar.Value is null))
+                throw new ArgumentException($"Invalid skill {key}");
+        if (map.Children.TryGetValue(new YamlScalarNode("metadata"), out var metadata) &&
+            (metadata is not YamlMappingNode mapping || mapping.Children.Any(pair => pair.Key is not YamlScalarNode { Value: not null } || pair.Value is not YamlScalarNode { Value: not null })))
+            throw new ArgumentException("Invalid skill metadata");
         return new SkillMetadata(name, description, path);
     }
     private static void ValidateName(string name)

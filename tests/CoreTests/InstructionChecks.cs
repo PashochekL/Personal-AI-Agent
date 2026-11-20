@@ -17,12 +17,13 @@ static class InstructionChecks
         {
             await File.WriteAllTextAsync(Path.Combine(root, "AGENTS.md"), "root rule");
             await File.WriteAllTextAsync(Path.Combine(root, "src", "AGENTS.md"), "nested rule");
+            await File.WriteAllTextAsync(Path.Combine(root, "src", "nested", "AGENTS.md"), "deep rule");
             await File.WriteAllTextAsync(Path.Combine(root, "src", "nested", "file.txt"), "content");
             await File.WriteAllTextAsync(Path.Combine(root, "skills", "helpful-skill", "SKILL.md"), "---\nname: helpful-skill\ndescription: |\n  Help with a task.\n---\nSECRET SKILL BODY\n");
             var workspace = new Workspace(root);
             var loader = new InstructionLoader(workspace);
             var instructions = await loader.LoadForPathAsync("src/nested/file.txt");
-            Check(instructions.Count == 2 && instructions[0].Content == "root rule" && instructions[1].Content == "nested rule", "hierarchy and order");
+            Check(instructions.Count == 3 && instructions[0].Content == "root rule" && instructions[1].Content == "nested rule" && instructions[2].Content == "deep rule", "hierarchy and order");
             Check((await loader.LoadForPathAsync("other.txt")).Count == 1, "sibling scope");
             var catalog = new SkillCatalog(workspace);
             var skills = await catalog.ListAsync();
@@ -35,6 +36,13 @@ static class InstructionChecks
             Directory.CreateDirectory(Path.Combine(root, "skills", "bad-skill"));
             await File.WriteAllTextAsync(Path.Combine(root, "skills", "bad-skill", "SKILL.md"), "---\nname: other\ndescription: x\n---\nbody");
             try { await catalog.LoadAsync("bad-skill"); throw new Exception("Mismatched name accepted"); } catch (ArgumentException) { checks++; }
+            foreach (var invalid in new[] { "compatibility: [linux]", "metadata: [invalid]", "metadata:\n  author: [invalid]", "allowed-tools: [shell]" })
+            {
+                await File.WriteAllTextAsync(Path.Combine(root, "skills", "bad-skill", "SKILL.md"), "---\nname: bad-skill\ndescription: test\n" + invalid + "\n---\nbody");
+                try { await catalog.LoadAsync("bad-skill"); throw new Exception("Invalid optional field accepted"); } catch (ArgumentException) { checks++; }
+            }
+            await File.WriteAllTextAsync(Path.Combine(root, "skills", "bad-skill", "SKILL.md"), "---\nname: bad-skill\ndescription: test\ncompatibility: Linux\nlicense: MIT\nmetadata:\n  author: test\nallowed-tools: shell\n---\nbody");
+            Check((await catalog.LoadAsync("bad-skill")).Contains("body"), "optional skill metadata accepted");
             Directory.Delete(Path.Combine(root, "skills", "bad-skill"), true);
             var store = new Store();
             var args = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>("""{"path":"src/nested/file.txt"}""")!;
@@ -46,6 +54,7 @@ static class InstructionChecks
             var result = await new Agent(model, store, registry, workspace: workspace).RunAsync("s", "read");
             Check(model.Requests[0].Any(m => m.Content is not null && m.Content.Contains("root rule") && m.Content.Contains("helpful-skill") && !m.Content.Contains("SECRET SKILL BODY")), "root instructions and skill metadata in context");
             Check(result.Status == Status.COMPLETED && store.Messages[2].Content!.Contains("nested rule") && !store.Messages[2].Content!.Contains("content"), "instructions precede file operation");
+            Check(store.Messages[2].Content!.Contains("More deeply nested") && store.Messages[2].Content!.Contains("deep rule"), "nearest instructions take precedence");
             Check(store.Messages[4].Content == "content", "file read after instructions");
             var batchStore = new Store();
             var batchModel = new Model(new LlmResponse { ToolCalls = [first, retry] }, new LlmResponse { Content = "done" });
