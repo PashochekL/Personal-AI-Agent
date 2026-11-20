@@ -8,5 +8,6 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../../src/ai_agent/core/Core.csproj" />
+    <ProjectReference Include="../../src/ai_agent/gateway/Gateway.csproj" />
   </ItemGroup>
 </Project>

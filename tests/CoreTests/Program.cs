@@ -90,6 +90,9 @@ using (var cancelled = new CancellationTokenSource())
     Check(result.Status == Status.CANCELLED && waiting.Stopped, "cancel reaches store");
 }
 Console.WriteLine($"{checks} core checks passed");
+Console.WriteLine($"{await FileSystemChecks.RunAsync()} filesystem checks passed");
+Console.WriteLine($"{await InstructionChecks.RunAsync()} instruction checks passed");
+Console.WriteLine($"{await GatewayChecks.RunAsync()} gateway checks passed");
 
 sealed class Echo : ITool
 {

@@ -1,0 +1,28 @@
+#!/bin/sh
+set -eu
+project_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+cd "$project_dir"
+umask 077
+mkdir -p .uv-cache
+key_file=.uv-cache/damir-gateway-key
+if [ ! -s "$key_file" ]; then
+  printf 'sk-%s\n' "$(openssl rand -hex 32)" > "$key_file"
+fi
+LITELLM_MASTER_KEY=$(cat "$key_file")
+export LITELLM_MASTER_KEY
+
+case "${1:-auth-check}" in
+  auth-check|login)
+    printf '%s\n' 'Вход в ChatGPT по коду устройства через LiteLLM.'
+    docker compose run --rm --no-deps --user 0 --entrypoint python gateway -c 'import os; os.chown("/tokens/chatgpt", 65532, 65532); os.chmod("/tokens/chatgpt", 0o700)'
+    exec docker compose run --rm --no-deps --entrypoint python gateway -u -c 'from litellm.llms.chatgpt.authenticator import Authenticator; Authenticator().get_access_token(); print("Вход завершён. Сессия сохранена в отдельном томе Дамира.")'
+    ;;
+  run)
+    docker compose up -d gateway
+    exec docker compose run --rm --build agent
+    ;;
+  *)
+    printf '%s\n' 'Использование: damir [login|auth-check|run]' >&2
+    exit 2
+    ;;
+esac

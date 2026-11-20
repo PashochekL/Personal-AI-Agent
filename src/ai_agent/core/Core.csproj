@@ -6,7 +6,9 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
   <ItemGroup>
+    <PackageReference Include="YamlDotNet" Version="16.3.0" />
     <ProjectReference Include="../shared/Shared.csproj" />
+    <Compile Include="../tools/filesystem/*.cs" Link="FileSystem/%(Filename)%(Extension)" />
     <PackageReference Include="JsonSchema.Net" Version="7.4.0" />
   </ItemGroup>
 </Project>
