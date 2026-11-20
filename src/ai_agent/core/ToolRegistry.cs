@@ -11,16 +11,25 @@ public sealed class ToolRegistry
     private sealed record Registration(ITool Tool, ToolDefinition Definition, JsonSchema Schema);
     private readonly Dictionary<string, Registration> _tools = new(StringComparer.Ordinal);
 
-    public void Register(ITool tool)
+    public void Register(ITool tool) => RegisterRange([tool]);
+
+    /// <summary>Validates every tool before registering any, so connection failures leave no partial set.</summary>
+    public void RegisterRange(IEnumerable<ITool> tools)
     {
-        ArgumentNullException.ThrowIfNull(tool);
-        if (string.IsNullOrWhiteSpace(tool.Name)) throw new ArgumentException("Tool name must not be blank");
-        if (_tools.ContainsKey(tool.Name)) throw new ArgumentException("Tool name is already registered");
-        var parameters = tool.Parameters.ToDictionary(pair => pair.Key, pair => pair.Value.Clone());
-        var schema = JsonSchema.FromText(JsonSerializer.Serialize(parameters));
-        var definition = new ToolDefinition { Name = tool.Name, Description = tool.Description, Parameters = parameters };
-        definition.Validate();
-        _tools.Add(tool.Name, new Registration(tool, definition, schema));
+        ArgumentNullException.ThrowIfNull(tools);
+        var pending = new Dictionary<string, Registration>(StringComparer.Ordinal);
+        foreach (var tool in tools)
+        {
+            ArgumentNullException.ThrowIfNull(tool);
+            if (string.IsNullOrWhiteSpace(tool.Name)) throw new ArgumentException("Tool name must not be blank");
+            if (_tools.ContainsKey(tool.Name) || pending.ContainsKey(tool.Name)) throw new ArgumentException("Tool name is already registered");
+            var parameters = tool.Parameters.ToDictionary(pair => pair.Key, pair => pair.Value.Clone());
+            var schema = JsonSchema.FromText(JsonSerializer.Serialize(parameters));
+            var definition = new ToolDefinition { Name = tool.Name, Description = tool.Description, Parameters = parameters };
+            definition.Validate();
+            pending.Add(tool.Name, new Registration(tool, definition, schema));
+        }
+        foreach (var (name, registration) in pending) _tools.Add(name, registration);
     }
 
     public IReadOnlyList<ToolDefinition> Definitions() => _tools.Values.Select(entry => new ToolDefinition

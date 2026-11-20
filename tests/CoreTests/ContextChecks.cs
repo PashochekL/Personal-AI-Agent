@@ -61,10 +61,22 @@ static class ContextChecks
         Check(previewModel.Requests.Count == 0 && previewStore.Messages.Count == 2 && measured!.All(m => m.Content != ""), "preview does not call model, change history, or count marker");
         var previewCache = new MemorySummaryCache();
         var previewSummaryModel = new Model(new LlmResponse { Content = "saved recap" });
-        var previewSummaryAgent = new Agent(previewSummaryModel, previewStore, new ToolRegistry(), contextWindow: new ContextWindow(12000, Counter, previewCache));
+        var summaryStore = new Store();
+        summaryStore.Messages.AddRange([new Message { Role = "user", Content = new string('x', 1000) }, new Message { Role = "assistant", Content = "done" }]);
+        Task<int> LengthCounter(IReadOnlyList<Message> messages, IReadOnlyList<ToolDefinition> _, CancellationToken __) { measured = messages; return Task.FromResult(messages.Sum(m => m.Content?.Length ?? 0)); }
+        var previewSummaryAgent = new Agent(previewSummaryModel, summaryStore, new ToolRegistry(), contextWindow: new ContextWindow(12000, LengthCounter, previewCache));
+        var before = await previewSummaryAgent.EstimateContextAsync("s");
         await previewSummaryAgent.CompactAsync("s");
         var savedEstimate = await previewSummaryAgent.EstimateContextAsync("s");
-        Check(savedEstimate.UsesSavedSummary && !savedEstimate.SummaryUnavailable && previewSummaryModel.Requests.Count == 1 && measured!.Any(m => m.Content!.Contains("saved recap")), "preview reuses cached summary without generating a new one");
+        Check(savedEstimate.Tokens < before.Tokens && savedEstimate.UsesSavedSummary && !savedEstimate.SummaryUnavailable && previewSummaryModel.Requests.Count == 1 && measured!.Any(m => m.Content!.Contains("saved recap")), "manual summary lowers estimate and is reused");
+        summaryStore.Messages.AddRange([new Message { Role = "user", Content = "new question" }, new Message { Role = "assistant", Content = "new answer" }]);
+        var laterEstimate = await previewSummaryAgent.EstimateContextAsync("s");
+        Check(laterEstimate.UsesSavedSummary && !laterEstimate.SummaryUnavailable && measured!.Any(m => m.Content == "new question") && previewSummaryModel.Requests.Count == 1, "preview retains cached prefix after later turns");
+        var tinyStore = new Store();
+        tinyStore.Messages.Add(new Message { Role = "user", Content = "hi" });
+        var tinyAgent = new Agent(new Model(new LlmResponse { Content = "long summary" }), tinyStore, new ToolRegistry(), contextWindow: new ContextWindow(12000, LengthCounter, new MemorySummaryCache()));
+        try { await tinyAgent.CompactAsync("s"); throw new Exception("Non-reducing summary accepted"); }
+        catch (ContextLimitException) { checks++; }
         Task<int> OversizeCounter(IReadOnlyList<Message> messages, IReadOnlyList<ToolDefinition> _, CancellationToken __) => Task.FromResult(messages.Any(m => m.Content == "remember this") ? 13000 : 500);
         var noCacheModel = new Model();
         var noCacheAgent = new Agent(noCacheModel, previewStore, new ToolRegistry(), contextWindow: new ContextWindow(12000, OversizeCounter));

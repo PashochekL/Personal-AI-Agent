@@ -26,6 +26,8 @@ static class GatewayChecks
         messages.Add(new Message { Role = "tool", Content = "file contents", ToolCallId = "call-1" });
         var final = await client.CompleteAsync(messages, [tool]);
         Check(final.Content == "done" && handler.HistoryMapped, "tool history and final response");
+        var bridgeClient = new LiteLlmClient(http, new Uri("http://gateway-bridge:8080"), null, "damir");
+        Check((await bridgeClient.ListModelsAsync()).Count == 2 && !handler.Authorized, "bridge client does not send gateway key");
         try { _ = new LiteLlmClient(http, new Uri("https://api.openai.com/v1"), "secret", "x"); throw new Exception("Direct provider URL accepted"); } catch (ArgumentException) { count++; }
         using var cts = new CancellationTokenSource();
         cts.Cancel();

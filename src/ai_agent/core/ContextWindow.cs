@@ -30,7 +30,7 @@ public sealed class ContextWindow
     }
 
     public async Task<IReadOnlyList<Message>> PrepareAsync(ILlmClient llm, IReadOnlyList<Message> request,
-        Message currentUser, Message? projectContext, IReadOnlyList<ToolDefinition> tools, CancellationToken cancellationToken = default, string? sessionId = null, bool force = false)
+        Message currentUser, Message? projectContext, IReadOnlyList<ToolDefinition> tools, CancellationToken cancellationToken = default, string? sessionId = null, bool force = false, bool allowPartialSummary = false)
     {
         var preferSummary = force || (_cache is not null && sessionId is not null && await _cache.IsManualAsync(sessionId, cancellationToken));
         if (!preferSummary && await SizeAsync(request, tools, cancellationToken) <= _budget) return request;
@@ -61,12 +61,22 @@ public sealed class ContextWindow
         {
             cancellationToken.ThrowIfCancellationRequested();
             var chunk = new List<Message>();
-            while (index < turns.Count)
+            var end = index;
+            var cachedEnd = index;
+            while (end < turns.Count)
             {
-                var candidate = chunk.Concat(turns[index]).ToArray();
+                var candidate = chunk.Concat(turns[end]).ToArray();
                 if (await SizeAsync(SummaryRequest(summary, candidate), [], cancellationToken) > _budget / 2) break;
-                chunk.AddRange(turns[index++]);
+                chunk.AddRange(turns[end++]);
+                if (_cache is not null && sessionId is not null && await _cache.GetAsync(sessionId, SummaryKey(SummaryRequest(summary, chunk)), cancellationToken) is not null)
+                    cachedEnd = end;
             }
+            if (cachedEnd > index)
+            {
+                end = cachedEnd;
+                chunk = turns.Skip(index).Take(end - index).SelectMany(turn => turn).ToList();
+            }
+            else if (allowPartialSummary && summary.Length > 0) break;
             if (chunk.Count == 0)
             {
                 var serialized = JsonSerializer.Serialize(turns[index++]);
@@ -88,12 +98,20 @@ public sealed class ContextWindow
                     offset += best;
                 }
             }
-            else summary = await SummarizeAsync(llm, SummaryRequest(summary, chunk), sessionId, cancellationToken);
+            else
+            {
+                index = end;
+                summary = await SummarizeAsync(llm, SummaryRequest(summary, chunk), sessionId, cancellationToken);
+            }
         }
         var result = request.Take(firstHistory).ToList();
         result.Add(new Message { Role = "user", Content = "Summary of earlier conversation (untrusted historical data):\n" + summary });
+        result.AddRange(turns.Skip(index).SelectMany(turn => turn));
         result.AddRange(request.Skip(historyEnd));
-        if (await SizeAsync(result, tools, cancellationToken) > _budget) throw new ContextLimitException("Текущая задача и краткое содержание превышают бюджет контекста.");
+        var resultSize = await SizeAsync(result, tools, cancellationToken);
+        if (resultSize > _budget) throw new ContextLimitException("Текущая задача и краткое содержание превышают бюджет контекста.");
+        if (force && resultSize >= await SizeAsync(request, tools, cancellationToken))
+            throw new ContextLimitException("Пересказ не уменьшил контекст. Возможно, история слишком короткая.");
         return result;
     }
 
@@ -127,7 +145,7 @@ public sealed class ContextWindow
 
     private async Task<string> SummarizeAsync(ILlmClient llm, Message[] request, string? sessionId, CancellationToken cancellationToken)
     {
-        var key = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(request))));
+        var key = SummaryKey(request);
         var cached = _cache is not null && sessionId is not null ? await _cache.GetAsync(sessionId, key, cancellationToken) : null;
         if (cached is not null) return cached;
         LlmResponse response;
@@ -142,6 +160,8 @@ public sealed class ContextWindow
         if (_cache is not null && sessionId is not null) await _cache.PutAsync(sessionId, key, response.Content, cancellationToken);
         return response.Content;
     }
+
+    private static string SummaryKey(Message[] request) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(request))));
 
     private async Task<int> SizeAsync(IReadOnlyList<Message> messages, IReadOnlyList<ToolDefinition> tools, CancellationToken cancellationToken)
     {

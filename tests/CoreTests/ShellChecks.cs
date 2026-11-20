@@ -13,10 +13,8 @@ static class ShellChecks
         void Check(bool value, string name) { checks++; if (!value) throw new Exception("Shell: " + name); }
         var sandbox = new FakeSandbox();
         var args = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>("""{"command":"printf hello","timeout":3}""")!;
-        var rejected = new ShellTool(sandbox, (_, _, _) => Task.FromResult(false));
-        Check(!(await rejected.ExecuteAsync(args)).Success && sandbox.Calls == 0, "rejection prevents execution");
-        var tool = new ShellTool(sandbox, (_, _, _) => Task.FromResult(true));
-        Check((await tool.ExecuteAsync(args)).Content.Contains("hello") && sandbox.Calls == 1 && sandbox.Timeout == 3, "approved command uses executor and timeout");
+        var tool = new ShellTool(sandbox);
+        Check((await tool.ExecuteAsync(args)).Content.Contains("hello") && sandbox.Calls == 1 && sandbox.Timeout == 3, "command uses executor without confirmation and with timeout");
         sandbox.Result = new CommandResult { ExitCode = null, TimedOut = true, Stdout = "partial" };
         var timeout = await tool.ExecuteAsync(args);
         Check(!timeout.Success && timeout.Content.Contains("partial") && timeout.Error == "Command timed out", "partial output on timeout");

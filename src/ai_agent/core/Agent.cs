@@ -67,7 +67,7 @@ public sealed class Agent : IAgent
         var definitions = _tools.Definitions();
         IReadOnlyList<Message> preview;
         var summaryUnavailable = false;
-        try { preview = await _contextWindow.PrepareAsync(new NoSummaryModel(), request, marker, project, definitions, cancellationToken, sessionId); }
+        try { preview = await _contextWindow.PrepareAsync(new NoSummaryModel(), request, marker, project, definitions, cancellationToken, sessionId, allowPartialSummary: true); }
         catch (SummaryUnavailableException) { preview = request; summaryUnavailable = true; }
         catch (ContextLimitException) { preview = request; summaryUnavailable = true; }
         var usedSummary = history.Any(old => !preview.Any(item => ReferenceEquals(item, old)));
