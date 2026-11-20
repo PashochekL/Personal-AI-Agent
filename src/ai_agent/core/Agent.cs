@@ -16,8 +16,10 @@ public sealed class Agent : IAgent
     private readonly int _maxIterations;
     private readonly InstructionLoader? _instructions;
     private readonly SkillCatalog? _skills;
+    private readonly string? _systemPrompt;
+    private readonly Func<string>? _systemContext;
 
-    public Agent(ILlmClient llm, IContextStore store, ToolRegistry tools, int maxIterations = 20, Workspace? workspace = null)
+    public Agent(ILlmClient llm, IContextStore store, ToolRegistry tools, int maxIterations = 20, Workspace? workspace = null, string? systemPrompt = null, Func<string>? systemContext = null)
     {
         ArgumentNullException.ThrowIfNull(llm);
         ArgumentNullException.ThrowIfNull(store);
@@ -27,6 +29,8 @@ public sealed class Agent : IAgent
         _store = store;
         _tools = tools;
         _maxIterations = maxIterations;
+        _systemPrompt = string.IsNullOrWhiteSpace(systemPrompt) ? null : systemPrompt;
+        _systemContext = systemContext;
         if (workspace is not null)
         {
             _instructions = new InstructionLoader(workspace);
@@ -77,6 +81,9 @@ public sealed class Agent : IAgent
                 cancellationToken.ThrowIfCancellationRequested();
                 var request = messages.ToList();
                 if (projectContext is not null) request.Insert(request.Count - 1 < 0 ? 0 : messages.FindIndex(m => ReferenceEquals(m, user)), projectContext);
+                var dynamicContext = _systemContext?.Invoke();
+                var systemText = string.Join("\n\n", new[] { _systemPrompt, dynamicContext }.Where(text => !string.IsNullOrWhiteSpace(text)));
+                if (systemText.Length > 0) request.Insert(0, new Message { Role = "system", Content = systemText });
                 var response = await _llm.CompleteAsync(request.ToArray(), _tools.Definitions(), cancellationToken);
                 cancellationToken.ThrowIfCancellationRequested();
                 response.Validate();

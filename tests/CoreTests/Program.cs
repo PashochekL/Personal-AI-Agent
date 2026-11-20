@@ -18,6 +18,25 @@ Check(store.Messages[2].ToolCallId == "1" && store.Messages[3].Content == "bye",
 Check(model.Requests[1].Count == 4, "tool results returned to model");
 
 store = new Store();
+model = new Model(new LlmResponse { ToolCalls = [Call("persona")] }, new LlmResponse { Content = "done" }, new LlmResponse { Content = "again" });
+var personaAgent = new Agent(model, store, Registry(), systemPrompt: "You are Damir");
+await personaAgent.RunAsync("s", "first");
+await personaAgent.RunAsync("s", "second");
+Check(model.Requests.All(r => r[0].Role == "system" && r[0].Content == "You are Damir") && store.Messages.All(m => m.Role != "system"), "system prompt sent every call without polluting history");
+
+var fakeClock = new AdjustableClock { Now = new DateTimeOffset(2026, 11, 20, 16, 59, 59, TimeSpan.Zero) };
+var zone = TimeZoneInfo.CreateCustomTimeZone("Test/Tomsk", TimeSpan.FromHours(7), "Test", "Test");
+var timeContext = new CurrentTimeContext(fakeClock, zone);
+store = new Store();
+model = new Model(new LlmResponse { Content = "first" }, new LlmResponse { Content = "second" });
+var timedAgent = new Agent(model, store, Registry(), systemPrompt: "Damir", systemContext: timeContext.GetContext);
+await timedAgent.RunAsync("s", "first");
+fakeClock.Now = fakeClock.Now.AddSeconds(2);
+await timedAgent.RunAsync("s", "second");
+Check(model.Requests[0][0].Content!.Contains("2026-11-20 23:59:59 +07:00") && model.Requests[1][0].Content!.Contains("2026-11-21 00:00:01 +07:00"), "time updates across requests and uses configured time zone");
+Check(model.Requests[1][0].Content!.Contains("Test/Tomsk") && store.Messages.All(m => m.Role != "system"), "time context reports zone and stays out of history");
+
+store = new Store();
 model = new Model(new LlmResponse { ToolCalls = [Call("1", "missing"), Call("2", arguments: "{\"text\":1}")] }, new LlmResponse { Content = "failed" });
 result = await new Agent(model, store, Registry()).RunAsync("s", "go");
 Check(result.Status == Status.COMPLETED && store.Messages[2].Content!.Contains("Unknown tool") && store.Messages[3].Content!.Contains("Invalid tool arguments"), "tool failures returned");
@@ -100,6 +119,11 @@ sealed class Echo : ITool
     public string Description => "Echo text";
     public IReadOnlyDictionary<string, JsonElement> Parameters { get; } = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>("""{"type":"object","properties":{"text":{"type":"string"}},"required":["text"],"additionalProperties":false}""")!;
     public Task<ToolResult> ExecuteAsync(IReadOnlyDictionary<string, JsonElement> arguments, CancellationToken cancellationToken = default) => Task.FromResult(new ToolResult { Success = true, Content = arguments["text"].GetString()! });
+}
+sealed class AdjustableClock : TimeProvider
+{
+    public DateTimeOffset Now { get; set; }
+    public override DateTimeOffset GetUtcNow() => Now;
 }
 sealed class Store : IContextStore
 {

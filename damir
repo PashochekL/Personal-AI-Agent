@@ -2,6 +2,17 @@
 set -eu
 project_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 cd "$project_dir"
+if [ -z "${DAMIR_TIMEZONE:-}" ]; then
+  local_zone=$(readlink /etc/localtime 2>/dev/null || true)
+  case "$local_zone" in
+    */zoneinfo/*) DAMIR_TIMEZONE=${local_zone#*/zoneinfo/} ;;
+    *) DAMIR_TIMEZONE=UTC
+       printf '%s\n' 'Не удалось определить часовой пояс компьютера; используется UTC. Можно задать DAMIR_TIMEZONE.' >&2 ;;
+  esac
+fi
+export DAMIR_TIMEZONE
+DAMIR_GATEWAY_CONFIG_REV=$(cksum config/litellm.yaml | awk '{print $1 "-" $2}')
+export DAMIR_GATEWAY_CONFIG_REV
 umask 077
 mkdir -p .uv-cache
 key_file=.uv-cache/damir-gateway-key

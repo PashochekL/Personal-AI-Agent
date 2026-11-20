@@ -1,7 +1,19 @@
 model_list:
+  - model_name: gpt-6.2-astra
+    litellm_params:
+      model: chatgpt/gpt-6.2-astra
+  - model_name: gpt-6.2-sol
+    litellm_params:
+      model: chatgpt/gpt-6.2-sol
+  - model_name: gpt-6-astra
+    litellm_params:
+      model: chatgpt/gpt-6-astra
   - model_name: gpt-6.1-sol
     litellm_params:
       model: chatgpt/gpt-6.1-sol
+  - model_name: gpt-6.1-terra
+    litellm_params:
+      model: chatgpt/gpt-6.1-terra
   - model_name: gpt-6-luna
     litellm_params:
       model: chatgpt/gpt-6-luna
