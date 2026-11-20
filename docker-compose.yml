@@ -5,6 +5,7 @@ services:
     environment:
       LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:?Set LITELLM_MASTER_KEY in .env}
       CHATGPT_TOKEN_DIR: /tokens/chatgpt
+      DAMIR_GATEWAY_CONFIG_REV: ${DAMIR_GATEWAY_CONFIG_REV:-manual}
     volumes:
       - ./config/litellm.yaml:/app/config.yaml:ro
       - damir_auth:/tokens/chatgpt
@@ -23,6 +24,7 @@ services:
     environment:
       LITELLM_API_KEY: ${LITELLM_MASTER_KEY:?Set LITELLM_MASTER_KEY in .env}
       DEFAULT_MODEL: ${DEFAULT_MODEL:-gpt-6.1-sol}
+      DAMIR_TIMEZONE: ${DAMIR_TIMEZONE:-UTC}
     volumes:
       - ./workspace:/workspace
     working_dir: /workspace
