@@ -1,4 +1,35 @@
 services:
+  shell-sandbox:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.shell-sandbox
+    network_mode: none
+    volumes:
+      - ./workspace:/workspace
+      - sandbox_ipc:/ipc
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    mem_limit: 256m
+    cpus: 0.5
+    restart: always
+  postgres:
+    image: postgres:17-alpine@sha256:526f86d93c6ea08fd3f1fe5605650cacc781b2c6013169a0ad8f42c7d3d84f32
+    environment:
+      POSTGRES_USER: damir
+      POSTGRES_DB: damir
+      POSTGRES_PASSWORD: ${DAMIR_POSTGRES_PASSWORD:?Use ./damir to set a database password}
+    volumes:
+      - damir_postgres:/var/lib/postgresql/data
+    networks: [agent_internal]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U damir -d damir"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
   gateway:
     image: ghcr.io/berriai/litellm@sha256:679c95daabea3e8775d42c744e6771b8a8cb47b3ea046ab9fb6c9deeb35d3dc3
     command: ["--config", "/app/config.yaml", "--port", "4000"]
@@ -25,8 +56,12 @@ services:
       LITELLM_API_KEY: ${LITELLM_MASTER_KEY:?Set LITELLM_MASTER_KEY in .env}
       DEFAULT_MODEL: ${DEFAULT_MODEL:-gpt-6.1-sol}
       DAMIR_TIMEZONE: ${DAMIR_TIMEZONE:-UTC}
+      DAMIR_CONTEXT_TOKENS: ${DAMIR_CONTEXT_TOKENS:-30000}
+      DAMIR_SESSION_ID: ${DAMIR_SESSION_ID:-local}
+      DAMIR_POSTGRES_PASSWORD: ${DAMIR_POSTGRES_PASSWORD:?Use ./damir to set a database password}
     volumes:
       - ./workspace:/workspace
+      - sandbox_ipc:/sandbox-ipc
     working_dir: /workspace
     read_only: true
     tmpfs:
@@ -41,6 +76,10 @@ services:
     depends_on:
       gateway:
         condition: service_healthy
+      postgres:
+        condition: service_healthy
+      shell-sandbox:
+        condition: service_started
     networks: [agent_internal]
 networks:
   agent_internal:
@@ -48,3 +87,5 @@ networks:
   gateway_egress: {}
 volumes:
   damir_auth: {}
+  damir_postgres: {}
+  sandbox_ipc: {}

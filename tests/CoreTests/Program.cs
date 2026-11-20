@@ -17,6 +17,20 @@ Check(store.Messages.Select(m => m.Role).SequenceEqual(["user", "assistant", "to
 Check(store.Messages[2].ToolCallId == "1" && store.Messages[3].Content == "bye", "tool correlation");
 Check(model.Requests[1].Count == 4, "tool results returned to model");
 
+var usageTotals = new UsageTotals();
+var usageModel = new UsageTrackingClient(new Model(
+    new LlmResponse { Content = "one", Usage = new TokenUsage { InputTokens = 3, OutputTokens = 2, TotalTokens = 5 } },
+    new LlmResponse { Content = "two", Usage = new TokenUsage { InputTokens = 4, OutputTokens = 1 } },
+    new LlmResponse { Content = "three" }), usageTotals);
+await usageModel.CompleteAsync([], []);
+await usageModel.CompleteAsync([], []);
+await usageModel.CompleteAsync([], []);
+var usageSnapshot = usageTotals.Snapshot();
+Check(usageSnapshot.Input == 7 && usageSnapshot.Output == 3 && usageSnapshot.Total == 10 && usageSnapshot.MissingUsageResponses == 1 && usageSnapshot.LastInput is null, "reported usage sums and missing usage is explicit");
+usageTotals.Record(new TokenUsage { InputTokens = 8, OutputTokens = 2, TotalTokens = 10 });
+usageTotals.ClearLastInput();
+Check(usageTotals.Snapshot().LastInput is null && usageTotals.Snapshot().Total == 20, "switching model clears last context but preserves total usage");
+
 store = new Store();
 model = new Model(new LlmResponse { ToolCalls = [Call("persona")] }, new LlmResponse { Content = "done" }, new LlmResponse { Content = "again" });
 var personaAgent = new Agent(model, store, Registry(), systemPrompt: "You are Damir");
@@ -112,6 +126,8 @@ Console.WriteLine($"{checks} core checks passed");
 Console.WriteLine($"{await FileSystemChecks.RunAsync()} filesystem checks passed");
 Console.WriteLine($"{await InstructionChecks.RunAsync()} instruction checks passed");
 Console.WriteLine($"{await GatewayChecks.RunAsync()} gateway checks passed");
+Console.WriteLine($"{await ContextChecks.RunAsync()} context checks passed");
+Console.WriteLine($"{await ShellChecks.RunAsync()} shell checks passed");
 
 sealed class Echo : ITool
 {

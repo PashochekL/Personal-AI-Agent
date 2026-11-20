@@ -7,7 +7,12 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../../src/ai_agent/sandbox/*.cs" Link="Sandbox/%(Filename)%(Extension)" />
+    <Compile Include="../../src/ai_agent/tools/shell/*.cs" Link="Shell/%(Filename)%(Extension)" />
     <ProjectReference Include="../../src/ai_agent/core/Core.csproj" />
     <ProjectReference Include="../../src/ai_agent/gateway/Gateway.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Npgsql" Version="10.0.1" />
   </ItemGroup>
 </Project>

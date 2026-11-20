@@ -17,6 +17,8 @@ static class GatewayChecks
         Check(models.SequenceEqual(["first", "second"]) && handler.Authorized, "model list and authentication");
         var tool = new ToolDefinition { Name = "filesystem.read_file", Description = "read", Parameters = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>("""{"type":"object"}""")! };
         var messages = new List<Message> { new() { Role = "user", Content = "read" } };
+        Check(await client.CountTokensAsync(messages, [tool]) == 17 && handler.CountMapped, "token estimate uses selected model and tool schema");
+        Check(await client.GetInputLimitAsync() == 500000, "model input limit from gateway");
         var first = await client.CompleteAsync(messages, [tool]);
         Check(handler.Authorized && first.ToolCalls.Single().Name == tool.Name, "tool name mapped");
         Check(first.Usage?.InputTokens == 3 && first.Usage.OutputTokens == 2, "usage mapped");
@@ -36,14 +38,22 @@ sealed class GatewayHandler : HttpMessageHandler
     private int _calls;
     public bool Authorized { get; private set; }
     public bool HistoryMapped { get; private set; }
+    public bool CountMapped { get; private set; }
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         Authorized = request.Headers.Authorization?.Scheme == "Bearer" && request.Headers.Authorization.Parameter == "test-proxy-key";
+        if (request.RequestUri!.AbsolutePath == "/utils/model_info")
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("""{"model_info":{"max_input_tokens":500000}}""", Encoding.UTF8, "application/json") };
         if (request.Method == HttpMethod.Get)
             return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("""{"data":[{"id":"first"},{"id":"second"},{"id":"first"}]}""", Encoding.UTF8, "application/json") };
         using var json = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(cancellationToken));
         var root = json.RootElement;
+        if (request.RequestUri.AbsolutePath == "/utils/token_counter")
+        {
+            CountMapped = root.GetProperty("model").GetString() == "damir" && root.GetProperty("tools").GetArrayLength() == 1;
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("""{"total_tokens":17,"error":false}""", Encoding.UTF8, "application/json") };
+        }
         var wireName = root.GetProperty("tools")[0].GetProperty("function").GetProperty("name").GetString();
         string body;
         if (_calls++ == 0)

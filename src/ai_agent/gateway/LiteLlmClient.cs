@@ -13,6 +13,8 @@ public sealed class LiteLlmClient : ILlmClient
     private readonly HttpClient _http;
     private readonly Uri _endpoint;
     private readonly Uri _modelsEndpoint;
+    private readonly Uri _countEndpoint;
+    private readonly Uri _modelInfoEndpoint;
     private readonly string _apiKey;
     private readonly string _model;
 
@@ -27,11 +29,59 @@ public sealed class LiteLlmClient : ILlmClient
         _http = http;
         _endpoint = new Uri(proxyBaseUrl.ToString().TrimEnd('/') + "/chat/completions");
         _modelsEndpoint = new Uri(proxyBaseUrl.ToString().TrimEnd('/') + "/models");
+        _countEndpoint = new Uri(proxyBaseUrl.ToString().TrimEnd('/') + "/utils/token_counter");
+        _modelInfoEndpoint = new Uri(proxyBaseUrl.ToString().TrimEnd('/') + "/utils/model_info?model=" + Uri.EscapeDataString(model));
         _apiKey = apiKey;
         _model = model;
     }
 
     private static string WireName(string name) => "tool_" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(name))).ToLowerInvariant()[..32];
+
+    private static object[] WireMessages(IReadOnlyList<Message> messages) => messages.Select(m =>
+    {
+        m.Validate();
+        var item = new Dictionary<string, object?> { ["role"] = m.Role, ["content"] = m.Content };
+        if (m.ToolCallId is not null) item["tool_call_id"] = m.ToolCallId;
+        if (m.ToolCalls.Count > 0) item["tool_calls"] = m.ToolCalls.Select(c => new { id = c.Id, type = "function", function = new { name = WireName(c.Name), arguments = JsonSerializer.Serialize(c.Arguments) } }).ToArray();
+        return (object)item;
+    }).ToArray();
+
+    private static object[] WireTools(IReadOnlyList<ToolDefinition> tools) => tools.Select(t => (object)new { type = "function", function = new { name = WireName(t.Name), description = t.Description, parameters = t.Parameters } }).ToArray();
+
+    public async Task<int> CountTokensAsync(IReadOnlyList<Message> messages, IReadOnlyList<ToolDefinition> tools, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Post, _countEndpoint) { Content = JsonContent.Create(new { model = _model, messages = WireMessages(messages), tools = WireTools(tools) }) };
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _apiKey);
+            using var response = await _http.SendAsync(request, cancellationToken);
+            if (!response.IsSuccessStatusCode) throw new AgentError($"Token counter returned HTTP {(int)response.StatusCode}");
+            using var json = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(cancellationToken), cancellationToken: cancellationToken);
+            var root = json.RootElement;
+            if ((root.TryGetProperty("error", out var error) && error.ValueKind == JsonValueKind.True) || !root.TryGetProperty("total_tokens", out var value) || !value.TryGetInt32(out var count) || count < 0)
+                throw new AgentError("Token counter returned invalid data");
+            return count;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (AgentError) { throw; }
+        catch (Exception e) when (e is HttpRequestException or JsonException or InvalidOperationException or OperationCanceledException)
+        { throw new AgentError("Token counter failed", e); }
+    }
+
+    public async Task<int?> GetInputLimitAsync(CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, _modelInfoEndpoint);
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _apiKey);
+            using var response = await _http.SendAsync(request, cancellationToken);
+            if (!response.IsSuccessStatusCode) return null;
+            using var json = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(cancellationToken), cancellationToken: cancellationToken);
+            return json.RootElement.TryGetProperty("model_info", out var info) && info.TryGetProperty("max_input_tokens", out var value) && value.TryGetInt32(out var limit) && limit > 0 ? limit : null;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception e) when (e is HttpRequestException or JsonException or InvalidOperationException or OperationCanceledException) { return null; }
+    }
 
     /// <summary>Returns model IDs exposed by this proxy, not the complete provider catalog.</summary>
     public async Task<IReadOnlyList<string>> ListModelsAsync(CancellationToken cancellationToken = default)
@@ -62,16 +112,9 @@ public sealed class LiteLlmClient : ILlmClient
         try
         {
             var names = tools.ToDictionary(t => WireName(t.Name), t => t.Name, StringComparer.Ordinal);
-            var wireMessages = messages.Select(m =>
-            {
-                m.Validate();
-                var item = new Dictionary<string, object?> { ["role"] = m.Role, ["content"] = m.Content };
-                if (m.ToolCallId is not null) item["tool_call_id"] = m.ToolCallId;
-                if (m.ToolCalls.Count > 0) item["tool_calls"] = m.ToolCalls.Select(c => new { id = c.Id, type = "function", function = new { name = WireName(c.Name), arguments = JsonSerializer.Serialize(c.Arguments) } }).ToArray();
-                return item;
-            }).ToArray();
+            var wireMessages = WireMessages(messages);
             var payload = new Dictionary<string, object?> { ["model"] = _model, ["messages"] = wireMessages };
-            if (tools.Count > 0) payload["tools"] = tools.Select(t => new { type = "function", function = new { name = WireName(t.Name), description = t.Description, parameters = t.Parameters } }).ToArray();
+            if (tools.Count > 0) payload["tools"] = WireTools(tools);
             using var request = new HttpRequestMessage(HttpMethod.Post, _endpoint) { Content = JsonContent.Create(payload) };
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _apiKey);
             using var response = await _http.SendAsync(request, cancellationToken);

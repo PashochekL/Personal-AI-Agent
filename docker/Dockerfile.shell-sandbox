@@ -1,0 +1,12 @@
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+WORKDIR /source
+COPY examples/ShellSandbox/ examples/ShellSandbox/
+RUN dotnet publish examples/ShellSandbox/ShellSandbox.csproj -c Release -o /app
+
+FROM mcr.microsoft.com/dotnet/runtime:10.0
+COPY --from=build /usr/share/powershell/ /usr/share/powershell/
+RUN mkdir /ipc && chown 65532:65532 /ipc && ln -s /usr/share/powershell/pwsh /usr/bin/pwsh
+WORKDIR /app
+COPY --from=build /app/ ./
+USER 65532:65532
+ENTRYPOINT ["dotnet", "/app/ShellSandbox.dll"]

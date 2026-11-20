@@ -2,6 +2,10 @@ using AiAgent.Core;
 using AiAgent.Gateway;
 using AiAgent.Shared;
 using AiAgent.Tools.FileSystem;
+using AiAgent.Tools.Shell;
+using AiAgent.Sandbox;
+using System.Text.Json;
+using Npgsql;
 
 var proxyKey = Environment.GetEnvironmentVariable("LITELLM_API_KEY");
 if (string.IsNullOrWhiteSpace(proxyKey)) { Console.Error.WriteLine("Set LITELLM_API_KEY."); return 1; }
@@ -10,13 +14,39 @@ var defaultModel = Environment.GetEnvironmentVariable("DEFAULT_MODEL");
 if (string.IsNullOrWhiteSpace(defaultModel)) defaultModel = "gpt-6.1-sol";
 var gateway = new LiteLlmClient(http, new Uri("http://gateway:4000"), proxyKey, defaultModel);
 var workspace = new Workspace("/workspace");
-var store = new SessionStore();
+var dbPassword = Environment.GetEnvironmentVariable("DAMIR_POSTGRES_PASSWORD");
+if (string.IsNullOrWhiteSpace(dbPassword)) { Console.Error.WriteLine("Не задан пароль базы Дамира. Запусти через ./damir run."); return 1; }
+var dbSettings = new NpgsqlConnectionStringBuilder { Host = "postgres", Database = "damir", Username = "damir", Password = dbPassword };
+await using var database = NpgsqlDataSource.Create(dbSettings.ConnectionString);
+var store = new PostgresSessionStore(database);
+try { await store.InitializeAsync(); }
+catch (NpgsqlException) { Console.Error.WriteLine("Не удалось подключиться к хранилищу диалога."); return 1; }
+var sessionId = Environment.GetEnvironmentVariable("DAMIR_SESSION_ID") ?? "local";
+if (string.IsNullOrWhiteSpace(sessionId)) { Console.Error.WriteLine("Идентификатор диалога не может быть пустым."); return 1; }
+await using var sessionLock = await database.OpenConnectionAsync();
+await using (var lockCommand = new NpgsqlCommand("SELECT pg_try_advisory_lock(hashtextextended($1, 0))", sessionLock))
+{
+    lockCommand.Parameters.AddWithValue(sessionId);
+    if ((bool)(await lockCommand.ExecuteScalarAsync())! == false)
+    {
+        Console.Error.WriteLine("Этот диалог уже открыт в другом процессе Дамира.");
+        return 1;
+    }
+}
+var usage = new UsageTotals(await store.GetUsageAsync(sessionId));
 var timeZoneId = Environment.GetEnvironmentVariable("DAMIR_TIMEZONE") ?? "UTC";
 TimeZoneInfo timeZone;
 try { timeZone = TimeZoneInfo.FindSystemTimeZoneById(timeZoneId); }
 catch (TimeZoneNotFoundException) { Console.Error.WriteLine($"Неизвестный часовой пояс: {timeZoneId}. Укажи DAMIR_TIMEZONE, например Asia/Tomsk."); return 1; }
 catch (InvalidTimeZoneException) { Console.Error.WriteLine($"Некорректные данные часового пояса: {timeZoneId}."); return 1; }
 var clock = new CurrentTimeContext(TimeProvider.System, timeZone);
+var contextBudgetText = Environment.GetEnvironmentVariable("DAMIR_CONTEXT_TOKENS");
+var contextBudget = 30_000;
+if (contextBudgetText is not null && (!int.TryParse(contextBudgetText, out contextBudget) || contextBudget < 4096))
+{
+    Console.Error.WriteLine("DAMIR_CONTEXT_TOKENS должен быть целым числом не меньше 4096.");
+    return 1;
+}
 const string personality = """
 Ты — Дамир, персональный ИИ-ассистент с характером наглого, самоуверенного
 острослова. Отвечай по-русски, если пользователь не выбрал другой язык. Общайся
@@ -49,6 +79,9 @@ const string personality = """
 к травле, унижению или агрессии; если пользователь просит сменить тон, послушай его.
 В серьёзных и чувствительных ситуациях говори бережно и без сарказма. Честно
 сообщай об ошибках и результатах инструментов, не выдумывай выполненные действия.
+История этого диалога сохраняется в локальной базе между запусками; при сжатии
+часть старых сообщений может передаваться тебе в пересказе, который не гарантирует
+сохранности всех деталей. Не обещай вечную память или доступ к другим диалогам.
 """;
 using var stop = new CancellationTokenSource();
 Console.CancelKeyPress += (_, e) => { e.Cancel = true; stop.Cancel(); };
@@ -72,21 +105,54 @@ async Task<string?> ChooseModelAsync(bool useDefault = false)
     }
     return null;
 }
-Agent CreateAgent(string model)
+int? modelInputLimit = null;
+int activeBudget = contextBudget;
+void ShowTokens()
+{
+    var statistics = usage.Snapshot();
+    Console.WriteLine($"Токены за этот диалог: всего {statistics.Total}, входных {statistics.Input}, выходных {statistics.Output}.");
+    if (statistics.MissingUsageResponses > 0) Console.WriteLine($"Шлюз не вернул полный расход для {statistics.MissingUsageResponses} ответ(ов), поэтому итог может быть неполным.");
+    Console.WriteLine("Включены ответы и запросы на сжатие; это не расход всей подписки.");
+}
+async Task ShowContextAsync(Agent currentAgent)
+{
+    var estimate = await currentAgent.EstimateContextAsync(sessionId, stop.Token);
+    Console.WriteLine($"Текущий контекст: примерно {estimate.Tokens} токенов — около {100.0 * estimate.Tokens / activeBudget:F1}% рабочего бюджета {activeBudget}.");
+    if (estimate.UsesSavedSummary) Console.WriteLine("Учтён сохранённый пересказ истории.");
+    if (estimate.SummaryUnavailable) Console.WriteLine("Показана полная история: перед следующим ответом может потребоваться сжатие.");
+    Console.WriteLine("В оценку входят инструкции и инструменты; текст следующего сообщения ещё не учтён.");
+    if (modelInputLimit is int limit) Console.WriteLine($"[Справочный лимит входа модели по данным шлюза: {limit}; для подписки ChatGPT он может отличаться.]");
+}
+async Task<Agent> CreateAgentAsync(string model)
 {
     var tools = new ToolRegistry();
     tools.Register(new ReadFileTool(workspace));
     tools.Register(new WriteFileTool(workspace));
     tools.Register(new EditFileTool(workspace));
     tools.Register(new ListDirectoryTool(workspace));
-    return new Agent(new LiteLlmClient(http, new Uri("http://gateway:4000"), proxyKey, model), store, tools, workspace: workspace, systemPrompt: personality, systemContext: clock.GetContext);
+    tools.Register(new ShellTool(new UnixSandboxExecutor(), async (command, timeout, cancellationToken) =>
+    {
+        Console.WriteLine($"Дамир предлагает выполнить команду в песочнице (таймаут {timeout} сек.):");
+        Console.WriteLine(JsonSerializer.Serialize(command));
+        Console.Write("Команда может менять файлы workspace. Разрешить? [да/нет]: ");
+        var answer = await Console.In.ReadLineAsync(cancellationToken);
+        var allowed = string.Equals(answer?.Trim(), "да", StringComparison.OrdinalIgnoreCase);
+        if (allowed) Console.WriteLine("Готовлю песочницу. После серии быстрых команд это может занять до минуты.");
+        return allowed;
+    }));
+    var client = new LiteLlmClient(http, new Uri("http://gateway:4000"), proxyKey, model);
+    modelInputLimit = await client.GetInputLimitAsync(stop.Token);
+    activeBudget = modelInputLimit is > 0 ? Math.Min(contextBudget, Math.Min(128000, Math.Max(4096, (int)(modelInputLimit.Value * 0.7)))) : Math.Min(contextBudget, 64000);
+    var contextWindow = new ContextWindow(activeBudget, client.CountTokensAsync, store);
+    var tracked = new UsageTrackingClient(client, usage, (record, token) => store.AddUsageAsync(sessionId, record, token));
+    return new Agent(tracked, store, tools, workspace: workspace, systemPrompt: personality, systemContext: clock.GetContext, contextWindow: contextWindow);
 }
 string? selected;
 try { selected = await ChooseModelAsync(useDefault: true); }
 catch (OperationCanceledException) when (stop.IsCancellationRequested) { return 0; }
 if (selected is null) return 1;
-var agent = CreateAgent(selected);
-Console.WriteLine($"Дамир готов. Модель: {selected}. Сменить: /models, выйти: /exit.");
+var agent = await CreateAgentAsync(selected);
+Console.WriteLine($"Дамир готов. Модель: {selected}. Команды: /models, /tokens, /context, /compact, /exit.");
 while (!stop.IsCancellationRequested)
 {
     Console.Write("> ");
@@ -94,42 +160,38 @@ while (!stop.IsCancellationRequested)
     try { input = await Console.In.ReadLineAsync(stop.Token); }
     catch (OperationCanceledException) when (stop.IsCancellationRequested) { break; }
     if (input is null || input.Trim() == "/exit") break;
+    if (input.Trim() == "/tokens") { ShowTokens(); continue; }
+    if (input.Trim() == "/context")
+    {
+        try { await ShowContextAsync(agent); }
+        catch (OperationCanceledException) when (stop.IsCancellationRequested) { break; }
+        catch (Exception e) when (e is ContextLimitException or AgentError or NpgsqlException or IOException or UnauthorizedAccessException or InvalidOperationException)
+        { Console.Error.WriteLine(e is ContextLimitException ? e.Message : "Не удалось оценить текущий контекст."); }
+        continue;
+    }
+    if (input.Trim() == "/compact")
+    {
+        try { Console.WriteLine(await agent.CompactAsync(sessionId, stop.Token) ? "История сжата; исходный диалог сохранён." : "История пока пуста."); }
+        catch (OperationCanceledException) when (stop.IsCancellationRequested) { break; }
+        catch (Exception e) when (e is AgentError or ContextLimitException or NpgsqlException) { Console.Error.WriteLine("Не удалось сжать историю: " + (e is ContextLimitException ? e.Message : "ошибка шлюза или хранилища")); }
+        continue;
+    }
     if (input.Trim() == "/models")
     {
         string? choice;
         try { choice = await ChooseModelAsync(); }
         catch (OperationCanceledException) when (stop.IsCancellationRequested) { break; }
         if (choice is null) { Console.WriteLine($"Модель не изменена: {selected}"); continue; }
+        if (!string.Equals(selected, choice, StringComparison.Ordinal)) usage.ClearLastInput();
         selected = choice;
-        agent = CreateAgent(selected);
+        agent = await CreateAgentAsync(selected);
         Console.WriteLine($"Выбрана модель: {selected}");
         continue;
     }
-    var result = await agent.RunAsync("local", input, stop.Token);
+    AgentResult result;
+    try { result = await agent.RunAsync(sessionId, input, stop.Token); }
+    catch (NpgsqlException) { Console.Error.WriteLine("Ошибка хранилища: ответ или история могли сохраниться не полностью."); break; }
     if (result.Status == AiAgent.Shared.TaskStatus.CANCELLED) break;
     Console.WriteLine(result.Response ?? result.Error);
 }
 return 0;
-
-sealed class SessionStore : IContextStore
-{
-    private readonly Dictionary<string, List<Message>> _sessions = [];
-    public Task<IReadOnlyList<Message>> GetMessagesAsync(string sessionId, CancellationToken cancellationToken = default)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        return Task.FromResult<IReadOnlyList<Message>>(_sessions.TryGetValue(sessionId, out var messages) ? messages.ToArray() : []);
-    }
-    public Task AppendMessageAsync(string sessionId, Message message, CancellationToken cancellationToken = default)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        if (!_sessions.TryGetValue(sessionId, out var messages)) _sessions[sessionId] = messages = [];
-        messages.Add(message);
-        return Task.CompletedTask;
-    }
-    public Task ReplaceMessagesAsync(string sessionId, IReadOnlyList<Message> messages, CancellationToken cancellationToken = default)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        _sessions[sessionId] = messages.ToList();
-        return Task.CompletedTask;
-    }
-}
