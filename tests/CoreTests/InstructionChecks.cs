@@ -32,6 +32,20 @@ static class InstructionChecks
             var skillTool = new SkillTool(catalog, false);
             var loaded = await skillTool.ExecuteAsync(new Dictionary<string, JsonElement> { ["name"] = JsonSerializer.SerializeToElement("helpful-skill") });
             Check(loaded.Success && loaded.Content.Contains("SECRET SKILL BODY"), "skill tool loads body");
+            var selectedModel = new Model(new LlmResponse { Content = "selected skill answer" });
+            var selectedStore = new Store();
+            var selectedAgent = new Agent(selectedModel, selectedStore, new ToolRegistry(), workspace: workspace);
+            var selectedResult = await selectedAgent.RunWithSkillAsync("selected", "perform task", "helpful-skill");
+            Check(selectedResult.Status == Status.COMPLETED && selectedModel.Requests[0].Any(m => m.Content?.Contains("SECRET SKILL BODY") == true) && selectedModel.Requests[0][^1].Content == "perform task", "selected skill loaded before request without tool call");
+            Check(selectedStore.Messages.All(m => m.Content?.Contains("SECRET SKILL BODY") != true), "selected skill body is not recorded as a user message");
+            var invalidModel = new Model();
+            var invalidAgent = new Agent(invalidModel, new Store(), new ToolRegistry(), workspace: workspace);
+            Check((await invalidAgent.RunWithSkillAsync("s", "task", "../escape")).Status == Status.FAILED && invalidModel.Requests.Count == 0, "selected skill traversal rejected before model call");
+            var automaticCall = new ToolCall { Id = "skill-1", Name = "skills.load", Arguments = new Dictionary<string, JsonElement> { ["name"] = JsonSerializer.SerializeToElement("helpful-skill") } };
+            var autoModel = new Model(new LlmResponse { ToolCalls = [automaticCall] }, new LlmResponse { Content = "loaded" });
+            var autoStore = new Store();
+            var autoResult = await new Agent(autoModel, autoStore, new ToolRegistry(), workspace: workspace).RunAsync("auto", "help with a task");
+            Check(autoResult.Status == Status.COMPLETED && autoStore.Messages.Any(m => m.Role == "tool" && m.Content?.Contains("SECRET SKILL BODY") == true), "model can load a skill using tool calling");
             try { await catalog.LoadAsync("../escape"); throw new Exception("Traversal accepted"); } catch (ArgumentException) { checks++; }
             Directory.CreateDirectory(Path.Combine(root, "skills", "bad-skill"));
             await File.WriteAllTextAsync(Path.Combine(root, "skills", "bad-skill", "SKILL.md"), "---\nname: other\ndescription: x\n---\nbody");
