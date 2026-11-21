@@ -14,6 +14,7 @@ var defaultModel = Environment.GetEnvironmentVariable("DEFAULT_MODEL");
 if (string.IsNullOrWhiteSpace(defaultModel)) defaultModel = "gpt-6.1-sol";
 var gateway = new LiteLlmClient(http, new Uri("http://gateway:4000"), proxyKey, defaultModel);
 var workspace = new Workspace("/workspace");
+var skillCatalog = new SkillCatalog(workspace);
 var dbPassword = Environment.GetEnvironmentVariable("DAMIR_POSTGRES_PASSWORD");
 if (string.IsNullOrWhiteSpace(dbPassword)) { Console.Error.WriteLine("Не задан пароль базы Дамира. Запусти через ./damir run."); return 1; }
 var dbSettings = new NpgsqlConnectionStringBuilder { Host = "postgres", Database = "damir", Username = "damir", Password = dbPassword };
@@ -145,7 +146,8 @@ try { selected = await ChooseModelAsync(useDefault: true); }
 catch (OperationCanceledException) when (stop.IsCancellationRequested) { return 0; }
 if (selected is null) return 1;
 var agent = await CreateAgentAsync(selected);
-Console.WriteLine($"Дамир готов. Модель: {selected}. Команды: /help, /models, /tokens, /context, /compress, /exit.");
+string? pendingSkill = null;
+Console.WriteLine($"Дамир готов. Модель: {selected}. Команды: /help, /models, /tokens, /context, /compress, /skill, /exit.");
 while (!stop.IsCancellationRequested)
 {
     Console.Write("> ");
@@ -155,7 +157,7 @@ while (!stop.IsCancellationRequested)
     if (input is null || input.Trim() == "/exit") break;
     if (input.Trim() == "/help")
     {
-        Console.WriteLine("/help — команды\n/models — выбор модели\n/tokens — потраченные токены\n/context — заполнение контекста\n/compress — сжать контекст\n/exit — выход");
+        Console.WriteLine("/help — команды\n/models — выбор модели\n/tokens — потраченные токены\n/context — заполнение контекста\n/compress — сжать контекст\n/skill имя — выбрать навык для следующего сообщения\n/skill 0 — отменить выбор навыка\n/exit — выход");
         continue;
     }
     if (input.Trim() == "/tokens") { ShowTokens(); continue; }
@@ -186,13 +188,33 @@ while (!stop.IsCancellationRequested)
         Console.WriteLine($"Выбрана модель: {selected}");
         continue;
     }
+    var trimmed = input.Trim();
+    if (trimmed == "/skill" || trimmed.StartsWith("/skill ", StringComparison.Ordinal) || trimmed.StartsWith("/skill\t", StringComparison.Ordinal))
+    {
+        var name = trimmed["/skill".Length..].Trim();
+        if (name.Length == 0) { Console.WriteLine("Укажи навык: /skill имя. Отмена: /skill 0."); continue; }
+        if (name == "0") { pendingSkill = null; Console.WriteLine("Выбор навыка отменён."); continue; }
+        pendingSkill = null;
+        try
+        {
+            _ = await skillCatalog.LoadAsync(name, stop.Token);
+            pendingSkill = name;
+            Console.WriteLine($"Навык {name} выбран для следующего сообщения.");
+        }
+        catch (OperationCanceledException) when (stop.IsCancellationRequested) { break; }
+        catch (Exception e) when (e is ArgumentException or IOException or UnauthorizedAccessException or InvalidOperationException or YamlDotNet.Core.YamlException)
+        { Console.Error.WriteLine("Не удалось загрузить навык. Проверь имя и файл SKILL.md."); }
+        continue;
+    }
     if (input.TrimStart().StartsWith('/'))
     {
         Console.WriteLine("Такой команды не знаю. Опять пальцы быстрее мыслей? Глянь /help.");
         continue;
     }
     AgentResult result;
-    try { result = await agent.RunAsync(sessionId, input, stop.Token); }
+    var skillForTurn = pendingSkill;
+    pendingSkill = null;
+    try { result = skillForTurn is null ? await agent.RunAsync(sessionId, input, stop.Token) : await agent.RunWithSkillAsync(sessionId, input, skillForTurn, stop.Token); }
     catch (NpgsqlException) { Console.Error.WriteLine("Ошибка хранилища: ответ или история могли сохраниться не полностью."); break; }
     if (result.Status == AiAgent.Shared.TaskStatus.CANCELLED) break;
     Console.WriteLine(result.Response ?? result.Error);
