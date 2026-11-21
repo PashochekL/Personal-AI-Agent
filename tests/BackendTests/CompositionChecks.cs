@@ -38,18 +38,29 @@ static class CompositionChecks
         var previous = changes.ToDictionary(x => x.Key, x => Environment.GetEnvironmentVariable(x.Key));
         var builder = WebApplication.CreateBuilder(); builder.WebHost.UseUrls("http://127.0.0.1:0"); builder.Logging.ClearProviders();
         await using var gateway = builder.Build();
-        gateway.MapPost("/utils/token_counter", () => Results.Json(new { total_tokens = 100 }));
+        gateway.MapPost("/utils/token_counter", async (HttpContext context) =>
+        {
+            using var json = await JsonDocument.ParseAsync(context.Request.Body);
+            return Results.Json(new { total_tokens = json.RootElement.GetProperty("messages").GetRawText().Contains("Summary of earlier conversation") ? 30 : 100 });
+        });
+        var catalogUnavailable = 0;
+        gateway.MapGet("/models", () => catalogUnavailable == 1 ? Results.StatusCode(503) : Results.Json(new { data = new[] { new { id = "synthetic-chat" }, new { id = "synthetic-other" }, new { id = "synthetic-vector" } } }));
+        gateway.MapGet("/utils/model_info", () => Results.Json(new { model_info = new { max_input_tokens = 120000 } }));
         gateway.MapPost("/v1/embeddings", () => Results.Json(new { data = new[] { new { index = 0, embedding = new[] { 1f, 0f, 0f } } } }));
         var modelCalls = 0;
         var webToolSeen = 0;
         var projectContextSeen = 0;
+        var selectedSkillSeen = 0;
+        var selectedModelSeen = 0;
         var webWireName = "tool_" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes("web.search"))).ToLowerInvariant()[..32];
         gateway.MapPost("/v1/responses", async (HttpContext context) =>
         {
             Interlocked.Increment(ref modelCalls);
             using var json = await JsonDocument.ParseAsync(context.Request.Body);
             var input = json.RootElement.GetProperty("input").GetRawText();
-            if (json.RootElement.GetProperty("tools").GetRawText().Contains(webWireName)) Interlocked.Exchange(ref webToolSeen, 1);
+            if (input.Contains("The owner selected") && input.Contains("Synthetic skill instructions")) Interlocked.Exchange(ref selectedSkillSeen, 1);
+            if (json.RootElement.GetProperty("model").GetString() == "synthetic-other") Interlocked.Exchange(ref selectedModelSeen, 1);
+            if (json.RootElement.TryGetProperty("tools", out var tools) && tools.GetRawText().Contains(webWireName)) Interlocked.Exchange(ref webToolSeen, 1);
             if (input.Contains("merged-project-instructions") && input.Contains("merged-skill")) Interlocked.Exchange(ref projectContextSeen, 1);
             if (input.Contains("save-backend-fact") && !input.Contains("function_call_output"))
             {
@@ -60,7 +71,7 @@ static class CompositionChecks
             var answer = input.Contains("recall-backend-fact")
                 ? input.Contains("likes synthetic violet") ? "recalled synthetic violet" : "missing memory"
                 : "saved through Core";
-            return Results.Json(new { status = "completed", output = new[] { new { type = "message", role = "assistant",
+            return Results.Json(new { status = "completed", usage = new { input_tokens = 100, output_tokens = 20, total_tokens = 120 }, output = new[] { new { type = "message", role = "assistant",
                 content = new[] { new { type = "output_text", text = answer } } } } });
         });
         await gateway.StartAsync();
@@ -78,13 +89,31 @@ static class CompositionChecks
             var history = await http.GetStringAsync("/sessions/" + saved.SessionId + "/messages");
             if (!history.Contains("memory.save") || !history.Contains("backend-save-1") || modelCalls != 3) throw new Exception("Tool calls did not round-trip through shared history");
             if (webToolSeen != 1 || projectContextSeen != 1) throw new Exception("Upstream web search or .agents context was lost in backend composition");
+            var cliCount = await CliCompositionChecks.RunAsync(http, options.ApiKey);
+            if (selectedSkillSeen != 1 || selectedModelSeen != 1) throw new Exception("CLI selections were not applied by Core and Gateway");
+            Console.WriteLine("PASS: selected model reaches Gateway and selected skill instructions reach Core context");
+            var skillFile = Path.Combine(skillDirectory, "SKILL.md");
+            File.Move(skillFile, skillFile + ".hidden");
+            try
+            {
+                using var cliHttp = new HttpClient();
+                var cli = new AiAgent.Cli.BackendClient(cliHttp, http.BaseAddress!, options.ApiKey);
+                var cliSession = await cli.ResolveSessionAsync("cli-synthetic", default);
+                var replay = await cli.SubmitAsync(new(cliSession.SessionId, "cli-selected-skill", "synthetic-other", "merged-skill", RequestKey: "cli-request"), default);
+                if (replay.Status != TaskStatus.COMPLETED) throw new Exception("Lost receipt was not recovered with unavailable skill");
+                Console.WriteLine("PASS: receipt recovery works after selected skill disappears");
+            }
+            finally { File.Move(skillFile + ".hidden", skillFile); }
+            Interlocked.Exchange(ref catalogUnavailable, 1);
+            try { await CliCompositionChecks.RunOfflineCatalogAsync(http, options.ApiKey); }
+            finally { Interlocked.Exchange(ref catalogUnavailable, 0); }
             await app.StopAsync();
             Console.WriteLine("PASS: production composition executes Core memory tool through gateway HTTP");
             Console.WriteLine("PASS: API session retrieves long-term memory saved in a different session");
             Console.WriteLine("PASS: production composition persists tool call IDs and results");
             Console.WriteLine("PASS: production composition advertises upstream web.search tool");
             Console.WriteLine("PASS: .agents instructions and skills coexist with long-term memory");
-            return 5;
+            return 8 + cliCount;
         }
         finally
         {

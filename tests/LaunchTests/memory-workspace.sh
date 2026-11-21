@@ -24,6 +24,11 @@ first_project=${first##*|}
 grep -q 'compose up -d --wait memory-db embeddings' "$MEMORY_CALL_LOG"
 grep -q 'compose build web-search' "$MEMORY_CALL_LOG"
 grep -q 'compose up -d --wait gateway postgres web-search' "$MEMORY_CALL_LOG"
+grep -q 'compose up -d --wait redis' "$MEMORY_CALL_LOG"
+grep -q 'compose run -d --rm --no-deps --build --name .* backend' "$MEMORY_CALL_LOG"
+grep -q 'compose run --no-deps --rm --build cli' "$MEMORY_CALL_LOG"
+if grep -q -- '--build agent' "$MEMORY_CALL_LOG"; then exit 1; fi
+grep -q 'stop --time 40 test-container' "$MEMORY_CALL_LOG"
 : > "$MEMORY_WORKSPACE_LOG"
 DAMIR_SESSION_ID=another-session sh "$fixture/damir/damir" run
 second=$(head -n 1 "$MEMORY_WORKSPACE_LOG")

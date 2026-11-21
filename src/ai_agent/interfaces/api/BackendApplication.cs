@@ -68,6 +68,8 @@ public static class BackendApplication
             catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested) { }
             catch (Exception e) when (e is NpgsqlException or RedisException or TimeoutException)
             { context.Response.StatusCode = 503; await context.Response.WriteAsJsonAsync(new { error = "Backend dependency unavailable. Check task status before retrying a submission." }, context.RequestAborted); }
+            catch (Exception e) when (e is AgentError or IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException or YamlDotNet.Core.YamlException)
+            { context.Response.StatusCode = 503; await context.Response.WriteAsJsonAsync(new { error = "Console service unavailable. Check gateway and project configuration." }, context.RequestAborted); }
         });
         static IResult Model<T>(T model, int code = 200) where T : ExchangeModel => Results.Content(ContractJson.Serialize(model), "application/json", statusCode: code);
         app.MapGet("/health/live", () => Results.Ok(new { status = "live" }));
@@ -83,6 +85,17 @@ public static class BackendApplication
             context.Response.Headers.Location = "/sessions/" + session.SessionId;
             return Model(session, 201);
         });
+        app.MapPost("/sessions/named/{name}", async (string name, PostgresTaskStore store, CancellationToken token) =>
+            Model(await store.ResolveSessionAsync(name, token)));
+        app.MapGet("/console", async (IBackendAgentFactory factory, CancellationToken token) =>
+            factory is CoreAgentFactory core ? Results.Json(await core.CatalogAsync(token)) : Results.StatusCode(501));
+        app.MapGet("/sessions/{id}/usage", async (string id, PostgresTaskStore store, IBackendAgentFactory factory, CancellationToken token) =>
+        {
+            if (!await store.HasSessionAsync(id, token)) return Results.NotFound();
+            if (factory is not CoreAgentFactory core) return Results.StatusCode(501);
+            var usage = await core.UsageAsync(id, token);
+            return Results.Json(new { input = usage.Input, output = usage.Output, total = usage.Total, missing_usage_responses = usage.MissingUsageResponses });
+        });
         app.MapGet("/sessions/{id}", async (string id, PostgresTaskStore store, CancellationToken token) =>
             await store.HasSessionAsync(id, token) ? Model(new Session { SessionId = id }) : Results.NotFound());
         app.MapGet("/sessions/{id}/messages", async (string id, PostgresTaskStore store, PostgresContextStore history, CancellationToken token) =>
@@ -91,12 +104,24 @@ public static class BackendApplication
             var messages = await history.GetMessagesAsync(id, token);
             return Results.Content("[" + string.Join(",", messages.Select(ContractJson.Serialize)) + "]", "application/json");
         });
-        app.MapPost("/tasks", async (HttpContext context, PostgresTaskStore store, CancellationToken token) =>
+        app.MapGet("/sessions/{id}/tasks/latest", async (string id, PostgresTaskStore store, CancellationToken token) =>
+        {
+            if (!await store.HasSessionAsync(id, token)) return Results.NotFound();
+            return await store.LatestAsync(id, token) is { } task ? Model(task) : Results.NoContent();
+        });
+        app.MapPost("/tasks", async (HttpContext context, PostgresTaskStore store, IBackendAgentFactory factory, CancellationToken token) =>
         {
             if (!context.Request.HasJsonContentType()) return Results.StatusCode(415);
             var request = await JsonSerializer.DeserializeAsync<TaskRequest>(context.Request.Body, Json, token)
                 ?? throw new TaskAdmissionException(400, "Request body required.");
-            var task = await store.SubmitAsync(request, context.Request.Headers.TryGetValue("Idempotency-Key", out var key) ? key.ToString() : null, token);
+            request.Selection.Validate();
+            var requestKey = context.Request.Headers.TryGetValue("Idempotency-Key", out var key) ? key.ToString() : null;
+            if (string.IsNullOrWhiteSpace(request.SessionId)) throw new TaskAdmissionException(400, "Session required.");
+            // A lost receipt can be recovered even if Gateway or the selected skill is now unavailable.
+            if (await store.ReplayAsync(request, requestKey, token) is { } replay) return Model(replay, 202);
+            if (factory is CoreAgentFactory core) await core.ValidateAsync(request.Selection, token);
+            else if (request.Selection != new TaskSelection()) throw new TaskAdmissionException(400, "Console operations unavailable.");
+            var task = await store.SubmitAsync(request, requestKey, token);
             context.Response.Headers.Location = "/tasks/" + task.TaskId;
             return Model(task, 202);
         });

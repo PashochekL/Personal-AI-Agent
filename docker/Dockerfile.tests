@@ -8,4 +8,6 @@ COPY damir ./damir
 RUN dotnet run --project tests/ContractTests/ContractTests.csproj
 RUN dotnet run --project tests/CoreTests/CoreTests.csproj
 RUN dotnet run --project tests/MemoryTests/MemoryTests.csproj
+RUN dotnet run --project tests/CliTests/CliTests.csproj
 RUN sh tests/LaunchTests/memory-workspace.sh
+RUN sh tests/LaunchTests/github-auth.sh

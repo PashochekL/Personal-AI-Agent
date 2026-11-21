@@ -72,24 +72,23 @@ case "${1:-run}" in
       git credential-osxkeychain "$1"
     }
     github_key() { printf 'protocol=https\nhost=damir-github.local\nusername=damir\n\n'; }
-    if [ "${1:-run}" = run ] && [ -z "${DAMIR_GITHUB_TOKEN:-}" ] && [ "$(uname -s)" = Darwin ]; then
+    if [ -z "${DAMIR_GITHUB_TOKEN:-}" ] && [ "$(uname -s)" = Darwin ]; then
       DAMIR_GITHUB_TOKEN=$(github_key | github_credentials get 2>/dev/null | sed -n 's/^password=//p')
     fi
     DAMIR_GITHUB_MCP=0
     if [ -n "${DAMIR_GITHUB_TOKEN:-}" ]; then DAMIR_GITHUB_MCP=1; fi
-    if [ "${1:-run}" = backend ]; then
-      DAMIR_GITHUB_MCP=0
-      if [ -z "${DAMIR_BACKEND_API_KEY:-}" ]; then
-        if [ ! -s .uv-cache/damir-backend-key ]; then openssl rand -hex 32 > .uv-cache/damir-backend-key; fi
-        DAMIR_BACKEND_API_KEY=$(cat .uv-cache/damir-backend-key)
-      fi
-      export DAMIR_BACKEND_API_KEY
+    if [ -z "${DAMIR_BACKEND_API_KEY:-}" ]; then
+      if [ ! -s .uv-cache/damir-backend-key ]; then openssl rand -hex 32 > .uv-cache/damir-backend-key; fi
+      DAMIR_BACKEND_API_KEY=$(cat .uv-cache/damir-backend-key)
     fi
+    export DAMIR_BACKEND_API_KEY
     export DAMIR_GITHUB_TOKEN
     export DAMIR_SANDBOX_VOLUME DAMIR_MCP_VOLUME DAMIR_GITHUB_MCP
     sandbox_id=
     github_id=
+    backend_id=
     cleanup() {
+      if [ -n "$backend_id" ]; then docker stop --time 40 "$backend_id" >/dev/null 2>&1 || true; fi
       if [ -n "$sandbox_id" ]; then docker stop "$sandbox_id" >/dev/null 2>&1 || true; fi
       if [ -n "$github_id" ]; then docker stop "$github_id" >/dev/null 2>&1 || true; fi
       docker volume rm "$DAMIR_SANDBOX_VOLUME" >/dev/null 2>&1 || true
@@ -100,7 +99,7 @@ case "${1:-run}" in
     trap 'exit 143' TERM
     docker compose build web-search
     docker compose up -d --wait gateway postgres web-search
-    if [ "${1:-run}" = backend ]; then docker compose up -d --wait redis; fi
+    docker compose up -d --wait redis
     if [ "${DAMIR_MEMORY_ENABLED:-1}" = 1 ]; then
       docker compose up -d --wait memory-db embeddings
       if ! docker compose exec -T embeddings ollama show embeddinggemma:300m >/dev/null 2>&1; then
@@ -118,7 +117,13 @@ case "${1:-run}" in
       if docker compose run --no-deps --rm --build --service-ports backend; then exit 0; else exit $?; fi
     fi
     while :; do
-      if docker compose run --no-deps --rm --build agent; then result=0; else result=$?; fi
+      backend_name="damir-backend-${DAMIR_SANDBOX_VOLUME#damir-ipc-}"
+      backend_id=$(docker compose run -d --rm --no-deps --build --name "$backend_name" backend)
+      DAMIR_CLI_BACKEND_URL="http://$backend_name:8080"
+      export DAMIR_CLI_BACKEND_URL
+      if docker compose run --no-deps --rm --build cli; then result=0; else result=$?; fi
+      docker stop --time 40 "$backend_id" >/dev/null
+      backend_id=
       case "$result" in
         71)
           if [ "$(uname -s)" != Darwin ]; then

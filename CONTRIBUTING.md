@@ -61,8 +61,10 @@ git switch --track -c develop origin/develop
    тестовыми адаптерами в проверках контрактов.
 3. Запустите `dotnet run --project tests/ContractTests/ContractTests.csproj` и `dotnet build src/ai_agent/shared/Shared.csproj`.
    При изменении ядра или памяти также запустите `dotnet run --project tests/CoreTests/CoreTests.csproj`
-   и `dotnet run --project tests/MemoryTests/MemoryTests.csproj`. Полный автономный
-   набор в Linux: `docker build -f docker/Dockerfile.tests -t personal-ai-agent-tests .`.
+   и `dotnet run --project tests/MemoryTests/MemoryTests.csproj`.
+   HTTP-клиент проверяется командой `dotnet run --project tests/CliTests/CliTests.csproj`.
+   Интеграция процесса CLI с backend: `pwsh -NoProfile -File tests/BackendTests/run-integration.ps1`.
+   Полный автономный набор в Linux: `docker build -f docker/Dockerfile.tests -t personal-ai-agent-tests .`.
    Проверки памяти с настоящей БД описаны в [SANDBOX.md](docs/SANDBOX.md#долговременная-память).
 4. Проверьте `git diff --check` и `git status`: секретов и локальных данных быть не должно.
 5. Обновите документацию с учётом фактически доступных возможностей.
@@ -76,7 +78,8 @@ git switch --track -c develop origin/develop
 сериализует всё выполнение Agent.run одной сессии; блокировки отдельных записей
 истории недостаточно. Первоначальные API, очередь и Worker реализованы;
 запуск и проверки описаны в [BACKEND.md](docs/BACKEND.md).
-Демонстрационная консоль пока использует прямой запуск Core.
+Обычный CLI использует HTTP backend; прямой пример Core сохранён в
+`examples/SandboxConsole`. Команды и ограничения описаны в [CLI.md](docs/CLI.md).
 Перенос из `develop`
 в `main` — через отдельный проверенный PR по решению команды.
 

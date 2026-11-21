@@ -1,5 +1,6 @@
 using AiAgent.Shared;
 using Npgsql;
+using System.Text.Json;
 using TaskStatus = AiAgent.Shared.TaskStatus;
 
 namespace AiAgent.Api;
@@ -33,6 +34,9 @@ public sealed class PostgresTaskStore(NpgsqlDataSource database, BackendOptions 
             CREATE INDEX IF NOT EXISTS damir_api_pending ON damir_api_tasks(session_id, sequence)
                 WHERE status IN ('PENDING','RUNNING');
             CREATE INDEX IF NOT EXISTS damir_api_scope ON damir_api_sessions(owner_id, project_id);
+            ALTER TABLE damir_api_sessions ADD COLUMN IF NOT EXISTS client_name text;
+            CREATE UNIQUE INDEX IF NOT EXISTS damir_api_named_session ON damir_api_sessions(owner_id,project_id,client_name);
+            ALTER TABLE damir_api_tasks ADD COLUMN IF NOT EXISTS selection text NOT NULL DEFAULT '{}';
             """);
         await command.ExecuteNonQueryAsync(ct);
     }
@@ -53,6 +57,39 @@ public sealed class PostgresTaskStore(NpgsqlDataSource database, BackendOptions 
         return (bool)(await command.ExecuteScalarAsync(ct))!;
     }
 
+    public async Task<Session> ResolveSessionAsync(string name, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(name) || name.Length > 128 || name.Any(char.IsControl))
+            throw new TaskAdmissionException(400, "Invalid session name.");
+        await using var command = Scoped("""
+            INSERT INTO damir_api_sessions(session_id,owner_id,project_id,client_name) VALUES($3,$1,$2,$4)
+            ON CONFLICT(owner_id,project_id,client_name) DO UPDATE SET client_name=EXCLUDED.client_name RETURNING session_id
+            """);
+        command.Parameters.AddWithValue(Guid.NewGuid().ToString("N")); command.Parameters.AddWithValue(name);
+        return new Session { SessionId = (string)(await command.ExecuteScalarAsync(ct))! };
+    }
+
+    public async Task<TaskSelection> SelectionAsync(string taskId, CancellationToken ct)
+    {
+        await using var command = Scoped("SELECT t.selection FROM damir_api_tasks t JOIN damir_api_sessions s USING(session_id) WHERE s.owner_id=$1 AND s.project_id=$2 AND task_id=$3");
+        command.Parameters.AddWithValue(taskId);
+        var json = (string?)await command.ExecuteScalarAsync(ct) ?? throw new InvalidOperationException("Task not found");
+        return JsonSerializer.Deserialize<TaskSelection>(json) ?? new();
+    }
+
+    public async Task<AgentTask?> ReplayAsync(TaskRequest request, string? key, CancellationToken ct)
+    {
+        if (key is null) return null;
+        await using var command = Scoped($"SELECT {Columns},t.selection FROM damir_api_tasks t JOIN damir_api_sessions s USING(session_id) WHERE s.owner_id=$1 AND s.project_id=$2 AND s.session_id=$3 AND t.request_key=$4");
+        command.Parameters.AddWithValue(request.SessionId); command.Parameters.AddWithValue(key);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        if (!await reader.ReadAsync(ct)) return null;
+        var previous = Read(reader);
+        if (previous.UserMessage != request.UserMessage || JsonSerializer.Deserialize<TaskSelection>(reader.GetString(5)) != request.Selection)
+            throw new TaskAdmissionException(409, "Idempotency-Key has a different request.");
+        return previous;
+    }
+
     private const string Columns = "t.task_id,t.session_id,t.user_message,t.status,t.result::text";
     private static AgentTask Read(NpgsqlDataReader reader)
     {
@@ -70,8 +107,17 @@ public sealed class PostgresTaskStore(NpgsqlDataSource database, BackendOptions 
         return await reader.ReadAsync(ct) ? Read(reader) : null;
     }
 
+    public async Task<AgentTask?> LatestAsync(string session, CancellationToken ct)
+    {
+        await using var command = Scoped($"SELECT {Columns} FROM damir_api_tasks t JOIN damir_api_sessions s USING(session_id) WHERE s.owner_id=$1 AND s.project_id=$2 AND s.session_id=$3 ORDER BY t.sequence DESC LIMIT 1");
+        command.Parameters.AddWithValue(session);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        return await reader.ReadAsync(ct) ? Read(reader) : null;
+    }
+
     public async Task<AgentTask> SubmitAsync(TaskRequest request, string? requestKey, CancellationToken ct = default)
     {
+        request.Selection.Validate();
         if (string.IsNullOrWhiteSpace(request.SessionId) || request.SessionId.Length > 128 || string.IsNullOrWhiteSpace(request.UserMessage) || request.UserMessage.Length > 32000)
             throw new TaskAdmissionException(400, "Invalid session_id or user_message (maximum 32000 characters).");
         if (requestKey is not null && (requestKey.Length is < 1 or > 128 || requestKey.Any(c => c is < '!' or > '~')))
@@ -85,13 +131,14 @@ public sealed class PostgresTaskStore(NpgsqlDataSource database, BackendOptions 
         }
         if (requestKey is not null)
         {
-            await using var existing = new NpgsqlCommand($"SELECT {Columns} FROM damir_api_tasks t WHERE session_id=$1 AND request_key=$2", connection, transaction);
+            await using var existing = new NpgsqlCommand($"SELECT {Columns},t.selection FROM damir_api_tasks t WHERE session_id=$1 AND request_key=$2", connection, transaction);
             existing.Parameters.AddWithValue(request.SessionId); existing.Parameters.AddWithValue(requestKey);
             await using var reader = await existing.ExecuteReaderAsync(ct);
             if (await reader.ReadAsync(ct))
             {
                 var previous = Read(reader);
-                if (previous.UserMessage != request.UserMessage) throw new TaskAdmissionException(409, "Idempotency-Key has a different message.");
+                if (previous.UserMessage != request.UserMessage || JsonSerializer.Deserialize<TaskSelection>(reader.GetString(5)) != request.Selection)
+                    throw new TaskAdmissionException(409, "Idempotency-Key has a different request.");
                 return previous;
             }
         }
@@ -101,10 +148,11 @@ public sealed class PostgresTaskStore(NpgsqlDataSource database, BackendOptions 
             if ((long)(await count.ExecuteScalarAsync(ct))! >= 100) throw new TaskAdmissionException(429, "Session queue is full.");
         }
         var task = new AgentTask { TaskId = Guid.NewGuid().ToString("N"), SessionId = request.SessionId, UserMessage = request.UserMessage };
-        await using (var insert = new NpgsqlCommand("INSERT INTO damir_api_tasks(task_id,session_id,user_message,status,request_key) VALUES($1,$2,$3,'PENDING',$4)", connection, transaction))
+        await using (var insert = new NpgsqlCommand("INSERT INTO damir_api_tasks(task_id,session_id,user_message,status,request_key,selection) VALUES($1,$2,$3,'PENDING',$4,$5)", connection, transaction))
         {
             insert.Parameters.AddWithValue(task.TaskId); insert.Parameters.AddWithValue(task.SessionId); insert.Parameters.AddWithValue(task.UserMessage);
             insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text, Value = (object?)requestKey ?? DBNull.Value });
+            insert.Parameters.AddWithValue(JsonSerializer.Serialize(request.Selection));
             await insert.ExecuteNonQueryAsync(ct);
         }
         await transaction.CommitAsync(ct);
