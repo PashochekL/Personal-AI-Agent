@@ -6,6 +6,8 @@ using AiAgent.Tools.Shell;
 using AiAgent.Sandbox;
 using System.Text.Json;
 using Npgsql;
+using System.Net.Sockets;
+using System.Text;
 
 var proxyKey = Environment.GetEnvironmentVariable("LITELLM_API_KEY");
 if (string.IsNullOrWhiteSpace(proxyKey)) { Console.Error.WriteLine("Set LITELLM_API_KEY."); return 1; }
@@ -42,11 +44,15 @@ catch (TimeZoneNotFoundException) { Console.Error.WriteLine($"Неизвестн
 catch (InvalidTimeZoneException) { Console.Error.WriteLine($"Некорректные данные часового пояса: {timeZoneId}."); return 1; }
 var clock = new CurrentTimeContext(TimeProvider.System, timeZone);
 var contextBudgetText = Environment.GetEnvironmentVariable("DAMIR_CONTEXT_TOKENS");
-var contextBudget = 30_000;
-if (contextBudgetText is not null && (!int.TryParse(contextBudgetText, out contextBudget) || contextBudget < 4096))
+int? contextBudget = null;
+if (!string.IsNullOrWhiteSpace(contextBudgetText))
 {
-    Console.Error.WriteLine("DAMIR_CONTEXT_TOKENS должен быть целым числом не меньше 4096.");
-    return 1;
+    if (!int.TryParse(contextBudgetText, out var configuredBudget) || configuredBudget < 4096)
+    {
+        Console.Error.WriteLine("DAMIR_CONTEXT_TOKENS должен быть целым числом не меньше 4096.");
+        return 1;
+    }
+    contextBudget = configuredBudget;
 }
 const string personality = """
 В обычной непринуждённой беседе твой характер заметен в каждом ответе, в том
@@ -93,6 +99,39 @@ const string personality = """
 """;
 using var stop = new CancellationTokenSource();
 Console.CancelKeyPress += (_, e) => { e.Cancel = true; stop.Cancel(); };
+McpTools? githubTools = null;
+if (Environment.GetEnvironmentVariable("DAMIR_GITHUB_MCP") == "1")
+{
+    try
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(stop.Token);
+        timeout.CancelAfter(TimeSpan.FromSeconds(30));
+        Socket? socket = null;
+        try
+        {
+            for (var attempt = 0; ; attempt++)
+            {
+                socket = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
+                try { await socket.ConnectAsync(new UnixDomainSocketEndPoint("/github-ipc/mcp.sock"), timeout.Token); break; }
+                catch (SocketException) when (attempt < 40) { socket.Dispose(); await Task.Delay(250, timeout.Token); }
+            }
+            var stream = new NetworkStream(socket, ownsSocket: true);
+            await stream.WriteAsync(Encoding.UTF8.GetBytes("{\"command\":\"github\",\"arguments\":[]}\n"), timeout.Token);
+            var response = new List<byte>();
+            var single = new byte[1];
+            while (await stream.ReadAsync(single, timeout.Token) > 0 && single[0] != '\n' && response.Count < 256) response.Add(single[0]);
+            if (Encoding.UTF8.GetString(response.ToArray()) != "{\"ok\":true}") throw new IOException("MCP server unavailable");
+            githubTools = await McpTools.ConnectAsync(stream, stream, "github", timeout.Token);
+        }
+        catch { socket?.Dispose(); throw; }
+    }
+    catch (Exception e) when (e is not OutOfMemoryException)
+    {
+        Console.Error.WriteLine("Не удалось подключить GitHub MCP. Проверь токен и сетевое подключение.");
+        return 1;
+    }
+}
+await using var githubConnection = githubTools;
 async Task<string?> ChooseModelAsync(bool useDefault = false)
 {
     IReadOnlyList<string> models;
@@ -114,7 +153,9 @@ async Task<string?> ChooseModelAsync(bool useDefault = false)
     return null;
 }
 int? modelInputLimit = null;
-int activeBudget = contextBudget;
+int activeBudget = 30_000;
+int contextReference = 30_000;
+ConsoleProgress? currentProgress = null;
 void ShowTokens()
 {
     var statistics = usage.Snapshot();
@@ -124,22 +165,24 @@ async Task ShowContextAsync(Agent currentAgent)
 {
     var estimate = await currentAgent.EstimateContextAsync(sessionId, stop.Token);
     if (estimate.SummaryUnavailable) throw new ContextLimitException("Не удалось оценить сжатый контекст.");
-    Console.WriteLine($"{100.0 * estimate.Tokens / activeBudget:F1}%");
+    Console.WriteLine($"~{estimate.Tokens} / {contextReference} ({100.0 * estimate.Tokens / contextReference:F1}%)");
 }
 async Task<Agent> CreateAgentAsync(string model)
 {
-    var tools = new ToolRegistry();
+    var tools = new ToolRegistry(name => currentProgress?.Tool(name));
     tools.Register(new ReadFileTool(workspace));
     tools.Register(new WriteFileTool(workspace));
     tools.Register(new EditFileTool(workspace));
     tools.Register(new ListDirectoryTool(workspace));
     tools.Register(new ShellTool(new UnixSandboxExecutor()));
+    githubTools?.Register(tools);
     var client = new LiteLlmClient(http, new Uri("http://gateway:4000"), proxyKey, model);
     modelInputLimit = await client.GetInputLimitAsync(stop.Token);
-    activeBudget = modelInputLimit is > 0 ? Math.Min(contextBudget, Math.Min(128000, Math.Max(4096, (int)(modelInputLimit.Value * 0.7)))) : Math.Min(contextBudget, 64000);
+    (contextReference, activeBudget) = ModelContextPolicy.For(model, modelInputLimit, contextBudget);
     var contextWindow = new ContextWindow(activeBudget, client.CountTokensAsync, store);
     var tracked = new UsageTrackingClient(client, usage, (record, token) => store.AddUsageAsync(sessionId, record, token));
-    return new Agent(tracked, store, tools, workspace: workspace, systemPrompt: personality, systemContext: clock.GetContext, contextWindow: contextWindow);
+    var progressClient = new ProgressLlmClient(tracked, () => currentProgress?.Model());
+    return new Agent(progressClient, store, tools, workspace: workspace, systemPrompt: personality, systemContext: clock.GetContext, contextWindow: contextWindow);
 }
 string? selected;
 try { selected = await ChooseModelAsync(useDefault: true); }
@@ -147,7 +190,7 @@ catch (OperationCanceledException) when (stop.IsCancellationRequested) { return 
 if (selected is null) return 1;
 var agent = await CreateAgentAsync(selected);
 string? pendingSkill = null;
-Console.WriteLine($"Дамир готов. Модель: {selected}. Команды: /help, /models, /tokens, /context, /compress, /skill, /exit.");
+Console.WriteLine($"Дамир готов. Модель: {selected}. Команды: /help, /models, /tokens, /context, /compress, /skill, /github-login, /github-logout, /exit.");
 while (!stop.IsCancellationRequested)
 {
     Console.Write("> ");
@@ -155,9 +198,11 @@ while (!stop.IsCancellationRequested)
     try { input = await Console.In.ReadLineAsync(stop.Token); }
     catch (OperationCanceledException) when (stop.IsCancellationRequested) { break; }
     if (input is null || input.Trim() == "/exit") break;
+    if (input.Trim() is "/github-login" or "damir github-login") return 71;
+    if (input.Trim() is "/github-logout" or "damir github-logout") return 72;
     if (input.Trim() == "/help")
     {
-        Console.WriteLine("/help — команды\n/models — выбор модели\n/tokens — потраченные токены\n/context — заполнение контекста\n/compress — сжать контекст\n/skill имя — выбрать навык для следующего сообщения\n/skill 0 — отменить выбор навыка\n/exit — выход");
+        Console.WriteLine("/help — команды\n/models — выбор модели\n/tokens — потраченные токены\n/context — заполнение контекста\n/compress — сжать контекст\n/skill имя — выбрать навык для следующего сообщения\n/skill 0 — отменить выбор навыка\n/github-login — подключить GitHub\n/github-logout — отключить GitHub\n/exit — выход");
         continue;
     }
     if (input.Trim() == "/tokens") { ShowTokens(); continue; }
@@ -171,7 +216,17 @@ while (!stop.IsCancellationRequested)
     }
     if (input.Trim() == "/compress")
     {
-        try { Console.WriteLine(await agent.CompactAsync(sessionId, stop.Token) ? "Готово." : "История пока пуста."); }
+        try
+        {
+            bool compacted;
+            await using (var progress = new ConsoleProgress(Console.Out, !Console.IsOutputRedirected))
+            {
+                currentProgress = progress;
+                try { compacted = await agent.CompactAsync(sessionId, stop.Token); }
+                finally { currentProgress = null; }
+            }
+            Console.WriteLine(compacted ? "Готово." : "История пока пуста.");
+        }
         catch (OperationCanceledException) when (stop.IsCancellationRequested) { break; }
         catch (Exception e) when (e is AgentError or ContextLimitException or NpgsqlException) { Console.Error.WriteLine("Не удалось сжать историю: " + (e is ContextLimitException ? e.Message : "ошибка шлюза или хранилища")); }
         continue;
@@ -214,7 +269,13 @@ while (!stop.IsCancellationRequested)
     AgentResult result;
     var skillForTurn = pendingSkill;
     pendingSkill = null;
-    try { result = skillForTurn is null ? await agent.RunAsync(sessionId, input, stop.Token) : await agent.RunWithSkillAsync(sessionId, input, skillForTurn, stop.Token); }
+    try
+    {
+        await using var progress = new ConsoleProgress(Console.Out, !Console.IsOutputRedirected);
+        currentProgress = progress;
+        try { result = skillForTurn is null ? await agent.RunAsync(sessionId, input, stop.Token) : await agent.RunWithSkillAsync(sessionId, input, skillForTurn, stop.Token); }
+        finally { currentProgress = null; }
+    }
     catch (NpgsqlException) { Console.Error.WriteLine("Ошибка хранилища: ответ или история могли сохраниться не полностью."); break; }
     if (result.Status == AiAgent.Shared.TaskStatus.CANCELLED) break;
     Console.WriteLine(result.Response ?? result.Error);

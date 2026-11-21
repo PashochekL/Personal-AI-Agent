@@ -7,7 +7,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $projectDir = $PSScriptRoot
 $invocationDir = (Get-Location).ProviderPath
-$changedEnvironment = @('DAMIR_TIMEZONE', 'DAMIR_GATEWAY_CONFIG_REV', 'LITELLM_MASTER_KEY', 'DAMIR_POSTGRES_PASSWORD', 'DAMIR_WORKSPACE', 'DAMIR_SESSION_ID', 'DAMIR_SANDBOX_VOLUME', 'COMPOSE_PROGRESS', 'COMPOSE_IGNORE_ORPHANS')
+$changedEnvironment = @('DAMIR_TIMEZONE', 'DAMIR_GATEWAY_CONFIG_REV', 'LITELLM_MASTER_KEY', 'DAMIR_POSTGRES_PASSWORD', 'DAMIR_WORKSPACE', 'DAMIR_SESSION_ID', 'DAMIR_SANDBOX_VOLUME', 'DAMIR_MCP_VOLUME', 'DAMIR_GITHUB_MCP', 'DAMIR_GITHUB_TOKEN', 'GCM_CREDENTIAL_STORE', 'GCM_INTERACTIVE', 'COMPOSE_PROGRESS', 'COMPOSE_IGNORE_ORPHANS')
 $previousEnvironment = @{}
 foreach ($name in $changedEnvironment) {
     $previousEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
@@ -57,6 +57,9 @@ try {
 
     $env:LITELLM_MASTER_KEY = Get-DamirSecret (Join-Path $stateDir 'damir-gateway-key') 'sk-'
     $env:DAMIR_POSTGRES_PASSWORD = Get-DamirSecret (Join-Path $stateDir 'damir-db-password') ''
+    $env:GCM_CREDENTIAL_STORE = 'wincredman'
+    $env:GCM_INTERACTIVE = 'Never'
+    $githubKey = "protocol=https`nhost=damir-github.local`nusername=damir`n`n"
 
     switch ($Command) {
         { $_ -in 'login', 'auth-check' } {
@@ -82,7 +85,19 @@ try {
                 }
             }
             $env:DAMIR_SANDBOX_VOLUME = 'damir-ipc-' + [Guid]::NewGuid().ToString('N')
+            $env:DAMIR_MCP_VOLUME = 'damir-mcp-' + [Guid]::NewGuid().ToString('N')
+            if ([string]::IsNullOrWhiteSpace($env:DAMIR_GITHUB_TOKEN)) {
+                try {
+                    $saved = $githubKey | & git credential-manager get 2>$null
+                    if ($LASTEXITCODE -eq 0) {
+                        $passwordLine = $saved | Where-Object { $_ -like 'password=*' } | Select-Object -First 1
+                        if ($passwordLine) { $env:DAMIR_GITHUB_TOKEN = $passwordLine.Substring(9) }
+                    }
+                } catch { }
+            }
+            $env:DAMIR_GITHUB_MCP = if ([string]::IsNullOrWhiteSpace($env:DAMIR_GITHUB_TOKEN)) { '0' } else { '1' }
             $sandboxId = $null
+            $githubId = $null
             try {
                 & docker compose up -d --wait gateway postgres
                 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -90,11 +105,61 @@ try {
                 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
                 $sandboxId = (& docker compose run -d --rm --no-deps shell-sandbox | Select-Object -Last 1)
                 if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($sandboxId)) { throw 'Не удалось запустить песочницу.' }
-                & docker compose run --no-deps --rm --build agent
-                exit $LASTEXITCODE
+                if ($env:DAMIR_GITHUB_MCP -eq '1') {
+                    & docker compose build github-mcp
+                    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                    $githubId = (& docker compose run -d --rm --no-deps github-mcp | Select-Object -Last 1)
+                    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($githubId)) { throw 'Не удалось запустить GitHub MCP.' }
+                }
+                while ($true) {
+                    & docker compose run --no-deps --rm --build agent
+                    $agentExit = $LASTEXITCODE
+                    if ($agentExit -eq 71) {
+                        $secret = Read-Host 'Вставь personal access token GitHub (ввод скрыт)' -AsSecureString
+                        $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secret)
+                        try { $githubToken = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr) }
+                        finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr); $secret.Dispose() }
+                        if ([string]::IsNullOrWhiteSpace($githubToken)) { Write-Host 'Токен не введён.'; continue }
+                        $stored = $false
+                        try {
+                            "protocol=https`nhost=damir-github.local`nusername=damir`npassword=$githubToken`n`n" | & git credential-manager store
+                            if ($LASTEXITCODE -ne 0) { throw 'Ошибка Git Credential Manager.' }
+                            $env:DAMIR_GITHUB_TOKEN = $githubToken
+                            $stored = $true
+                        } catch {
+                            [Console]::Error.WriteLine('Не удалось сохранить токен. Проверь, что Git Credential Manager установлен.')
+                        } finally { $githubToken = $null }
+                        if (-not $stored) { continue }
+                        if ($githubId) { & docker stop $githubId 2>$null | Out-Null; $githubId = $null }
+                        & docker compose build github-mcp
+                        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                        $githubId = (& docker compose run -d --rm --no-deps github-mcp | Select-Object -Last 1)
+                        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($githubId)) { throw 'Не удалось запустить GitHub MCP.' }
+                        $env:DAMIR_GITHUB_MCP = '1'
+                        Write-Host 'Токен сохранён в Credential Manager. Переподключаю GitHub.'
+                        continue
+                    }
+                    if ($agentExit -eq 72) {
+                        try {
+                            $githubKey | & git credential-manager erase
+                            if ($LASTEXITCODE -ne 0) { throw 'Ошибка Git Credential Manager.' }
+                        } catch {
+                            [Console]::Error.WriteLine('Не удалось удалить токен из Credential Manager.')
+                            continue
+                        }
+                        $env:DAMIR_GITHUB_TOKEN = ''
+                        $env:DAMIR_GITHUB_MCP = '0'
+                        if ($githubId) { & docker stop $githubId 2>$null | Out-Null; $githubId = $null }
+                        Write-Host 'Дамир отключён от GitHub; токен удалён из Credential Manager.'
+                        continue
+                    }
+                    exit $agentExit
+                }
             } finally {
                 if ($sandboxId) { & docker stop $sandboxId 2>$null | Out-Null }
+                if ($githubId) { & docker stop $githubId 2>$null | Out-Null }
                 & docker volume rm $env:DAMIR_SANDBOX_VOLUME 2>$null | Out-Null
+                & docker volume rm $env:DAMIR_MCP_VOLUME 2>$null | Out-Null
             }
         }
     }

@@ -6,6 +6,15 @@ using System.Text.Json;
 const string socketPath = "/ipc/sandbox.sock";
 const int maxOutput = 16384;
 var jsonOptions = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+if (Environment.GetEnvironmentVariable("DAMIR_GITHUB_MCP") == "1")
+{
+    await McpStdioBroker.ServeAsync();
+    return;
+}
+await ServeShellAsync();
+
+async Task ServeShellAsync()
+{
 if (File.Exists(socketPath)) File.Delete(socketPath);
 using var listener = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
 listener.Bind(new UnixDomainSocketEndPoint(socketPath));
@@ -14,6 +23,7 @@ while (true)
 {
     using var client = await listener.AcceptAsync();
     await HandleAsync(client);
+}
 }
 
 async Task HandleAsync(Socket client)

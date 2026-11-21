@@ -3,6 +3,8 @@ using AiAgent.Core;
 using AiAgent.Shared;
 using Status = AiAgent.Shared.TaskStatus;
 
+if (Environment.GetEnvironmentVariable("DAMIR_TEST_GITHUB_MCP") == "1") { await McpChecks.GithubSmokeAsync(); return; }
+
 var checks = 0;
 void Check(bool condition, string name) { checks++; if (!condition) throw new Exception($"Failed: {name}"); }
 ToolCall Call(string id, string name = "echo", string arguments = "{\"text\":\"hello\"}") => new()
@@ -148,6 +150,9 @@ Console.WriteLine($"{await InstructionChecks.RunAsync()} instruction checks pass
 Console.WriteLine($"{await GatewayChecks.RunAsync()} gateway checks passed");
 Console.WriteLine($"{await ContextChecks.RunAsync()} context checks passed");
 Console.WriteLine($"{await ShellChecks.RunAsync()} shell checks passed");
+Console.WriteLine($"{await McpChecks.RunAsync()} MCP checks passed");
+Console.WriteLine($"{await ProgressChecks.RunAsync()} progress checks passed");
+Console.WriteLine($"{ContextPolicyChecks.Run()} context policy checks passed");
 
 sealed class Echo : ITool
 {
