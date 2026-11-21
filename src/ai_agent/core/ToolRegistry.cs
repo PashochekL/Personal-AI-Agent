@@ -10,6 +10,9 @@ public sealed class ToolRegistry
 {
     private sealed record Registration(ITool Tool, ToolDefinition Definition, JsonSchema Schema);
     private readonly Dictionary<string, Registration> _tools = new(StringComparer.Ordinal);
+    private readonly Action<string>? _onExecute;
+
+    public ToolRegistry(Action<string>? onExecute = null) => _onExecute = onExecute;
 
     public void Register(ITool tool) => RegisterRange([tool]);
 
@@ -53,6 +56,7 @@ public sealed class ToolRegistry
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
+            try { _onExecute?.Invoke(call.Name); } catch (Exception) { /* Progress reporting must not affect tools. */ }
             var result = await entry.Tool.ExecuteAsync(call.Arguments, cancellationToken);
             result.Validate();
             return result;

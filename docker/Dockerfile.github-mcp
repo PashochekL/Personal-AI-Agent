@@ -1,0 +1,11 @@
+FROM ghcr.io/github/github-mcp-server:v2.0.2@sha256:ffced0d76e77428532a2ced185516992d77fd146d69eec2f244e6237d1a97796 AS github
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+WORKDIR /source
+COPY examples/ShellSandbox/ examples/ShellSandbox/
+RUN dotnet publish examples/ShellSandbox/ShellSandbox.csproj -c Release -o /app
+FROM mcr.microsoft.com/dotnet/runtime:10.0
+RUN mkdir /ipc && chown 65532:65532 /ipc
+COPY --from=github /server/github-mcp-server /server/github-mcp-server
+COPY --from=build /app/ /app/
+USER 65532:65532
+ENTRYPOINT ["dotnet", "/app/ShellSandbox.dll"]

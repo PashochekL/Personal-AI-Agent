@@ -1,4 +1,23 @@
 services:
+  github-mcp:
+    profiles: [mcp]
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.github-mcp
+    environment:
+      DAMIR_GITHUB_MCP: "1"
+      GITHUB_PERSONAL_ACCESS_TOKEN: ${DAMIR_GITHUB_TOKEN:-}
+    volumes:
+      - github_mcp_ipc:/ipc
+    networks: [github_egress]
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    mem_limit: 256m
+    cpus: 0.5
   shell-sandbox:
     build:
       context: .
@@ -58,14 +77,16 @@ services:
       LITELLM_API_KEY: ${LITELLM_MASTER_KEY:?Set LITELLM_MASTER_KEY in .env}
       DEFAULT_MODEL: ${DEFAULT_MODEL:-gpt-6.1-sol}
       DAMIR_TIMEZONE: ${DAMIR_TIMEZONE:-UTC}
-      DAMIR_CONTEXT_TOKENS: ${DAMIR_CONTEXT_TOKENS:-30000}
+      DAMIR_CONTEXT_TOKENS: ${DAMIR_CONTEXT_TOKENS:-}
       DAMIR_SESSION_ID: ${DAMIR_SESSION_ID:-local}
       DAMIR_POSTGRES_PASSWORD: ${DAMIR_POSTGRES_PASSWORD:?Use ./damir to set a database password}
+      DAMIR_GITHUB_MCP: ${DAMIR_GITHUB_MCP:-0}
     volumes:
       - type: bind
         source: ${DAMIR_WORKSPACE:-./workspace}
         target: /workspace
       - sandbox_ipc:/sandbox-ipc
+      - github_mcp_ipc:/github-ipc
     working_dir: /workspace
     read_only: true
     tmpfs:
@@ -89,8 +110,11 @@ networks:
   agent_internal:
     internal: true
   gateway_egress: {}
+  github_egress: {}
 volumes:
   damir_auth: {}
   damir_postgres: {}
   sandbox_ipc:
     name: ${DAMIR_SANDBOX_VOLUME:-personal-ai-agent_sandbox_ipc}
+  github_mcp_ipc:
+    name: ${DAMIR_MCP_VOLUME:-personal-ai-agent_github_mcp_ipc}

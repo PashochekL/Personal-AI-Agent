@@ -59,11 +59,29 @@ case "${1:-run}" in
     fi
     export DAMIR_WORKSPACE DAMIR_SESSION_ID
     DAMIR_SANDBOX_VOLUME="damir-ipc-$(openssl rand -hex 16)"
-    export DAMIR_SANDBOX_VOLUME
+    DAMIR_MCP_VOLUME="damir-mcp-$(openssl rand -hex 16)"
+    github_credentials() {
+      if [ "$(uname -s)" != Darwin ]; then
+        printf '%s\n' 'Системное хранилище GitHub пока поддерживается на macOS и Windows.' >&2
+        return 1
+      fi
+      git credential-osxkeychain "$1"
+    }
+    github_key() { printf 'protocol=https\nhost=damir-github.local\nusername=damir\n\n'; }
+    if [ -z "${DAMIR_GITHUB_TOKEN:-}" ] && [ "$(uname -s)" = Darwin ]; then
+      DAMIR_GITHUB_TOKEN=$(github_key | github_credentials get 2>/dev/null | sed -n 's/^password=//p')
+    fi
+    DAMIR_GITHUB_MCP=0
+    if [ -n "${DAMIR_GITHUB_TOKEN:-}" ]; then DAMIR_GITHUB_MCP=1; fi
+    export DAMIR_GITHUB_TOKEN
+    export DAMIR_SANDBOX_VOLUME DAMIR_MCP_VOLUME DAMIR_GITHUB_MCP
     sandbox_id=
+    github_id=
     cleanup() {
       if [ -n "$sandbox_id" ]; then docker stop "$sandbox_id" >/dev/null 2>&1 || true; fi
+      if [ -n "$github_id" ]; then docker stop "$github_id" >/dev/null 2>&1 || true; fi
       docker volume rm "$DAMIR_SANDBOX_VOLUME" >/dev/null 2>&1 || true
+      docker volume rm "$DAMIR_MCP_VOLUME" >/dev/null 2>&1 || true
     }
     trap cleanup EXIT
     trap 'exit 130' INT
@@ -71,8 +89,55 @@ case "${1:-run}" in
     docker compose up -d --wait gateway postgres
     docker compose build shell-sandbox
     sandbox_id=$(docker compose run -d --rm --no-deps shell-sandbox)
-    if docker compose run --no-deps --rm --build agent; then result=0; else result=$?; fi
-    exit "$result"
+    if [ "$DAMIR_GITHUB_MCP" = 1 ]; then
+      docker compose build github-mcp
+      github_id=$(docker compose run -d --rm --no-deps github-mcp)
+    fi
+    while :; do
+      if docker compose run --no-deps --rm --build agent; then result=0; else result=$?; fi
+      case "$result" in
+        71)
+          if [ "$(uname -s)" != Darwin ]; then
+            printf '%s\n' 'Вход в этом скрипте доступен на macOS; на Windows используй damir.ps1.' >&2
+            continue
+          fi
+          printf '%s' 'Вставь personal access token GitHub (ввод скрыт): '
+          trap 'stty echo 2>/dev/null || true; exit 130' INT
+          trap 'stty echo 2>/dev/null || true; exit 143' TERM
+          stty -echo
+          IFS= read -r github_token || github_token=
+          stty echo
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+          printf '\n'
+          if [ -z "$github_token" ]; then printf '%s\n' 'Токен не введён.'; continue; fi
+          if printf 'protocol=https\nhost=damir-github.local\nusername=damir\npassword=%s\n\n' "$github_token" | github_credentials store; then
+            DAMIR_GITHUB_TOKEN=$github_token
+            export DAMIR_GITHUB_TOKEN
+            github_token=
+            if [ -n "$github_id" ]; then docker stop "$github_id" >/dev/null; github_id=; fi
+            docker compose build github-mcp
+            github_id=$(docker compose run -d --rm --no-deps github-mcp)
+            DAMIR_GITHUB_MCP=1
+            export DAMIR_GITHUB_MCP
+            printf '%s\n' 'Токен сохранён в Связке ключей. Переподключаю GitHub.'
+          else
+            github_token=
+            printf '%s\n' 'Не удалось сохранить токен в Связке ключей.' >&2
+          fi
+          ;;
+        72)
+          if github_key | github_credentials erase; then
+            DAMIR_GITHUB_TOKEN=
+            DAMIR_GITHUB_MCP=0
+            export DAMIR_GITHUB_TOKEN DAMIR_GITHUB_MCP
+            if [ -n "$github_id" ]; then docker stop "$github_id" >/dev/null; github_id=; fi
+            printf '%s\n' 'Дамир отключён от GitHub; токен удалён из Связки ключей.'
+          else printf '%s\n' 'Не удалось удалить токен из Связки ключей.' >&2; fi
+          ;;
+        *) exit "$result" ;;
+      esac
+    done
     ;;
   *)
     printf '%s\n' 'Использование: damir [login|auth-check|run]' >&2
