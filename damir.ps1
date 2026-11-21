@@ -99,7 +99,9 @@ try {
             $sandboxId = $null
             $githubId = $null
             try {
-                & docker compose up -d --wait gateway postgres
+                & docker compose build web-search
+                if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                & docker compose up -d --wait gateway postgres web-search
                 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
                 & docker compose build shell-sandbox
                 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

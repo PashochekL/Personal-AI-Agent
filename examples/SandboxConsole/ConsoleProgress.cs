@@ -22,6 +22,23 @@ internal sealed class ConsoleProgress : IAsyncDisposable
     }
 
     public void Model() => SetStatus("Обращается к модели");
+    public void SkillLoaded(string name)
+    {
+        var safe = new string(name.Where(c => char.IsAsciiLetterOrDigit(c) || c == '-').Take(64).ToArray());
+        if (safe.Length == 0) return;
+        lock (_gate)
+        {
+            if (_disposed) return;
+            try
+            {
+                if (_enabled) _writer.Write("\r\u001b[2K");
+                _writer.WriteLine($"Скилл загружен: {safe}");
+                _writer.Flush();
+                if (_enabled) DrawLocked();
+            }
+            catch (IOException) { }
+        }
+    }
     public void Tool(string name)
     {
         var safe = new string(name.Where(c => char.IsAsciiLetterOrDigit(c) || c is '.' or '_' or '-').Take(48).ToArray());

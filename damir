@@ -86,7 +86,8 @@ case "${1:-run}" in
     trap cleanup EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
-    docker compose up -d --wait gateway postgres
+    docker compose build web-search
+    docker compose up -d --wait gateway postgres web-search
     docker compose build shell-sandbox
     sandbox_id=$(docker compose run -d --rm --no-deps shell-sandbox)
     if [ "$DAMIR_GITHUB_MCP" = 1 ]; then

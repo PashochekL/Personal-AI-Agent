@@ -1,4 +1,18 @@
 services:
+  web-search:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.web-search
+    networks: [search_internal, search_egress]
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    mem_limit: 256m
+    cpus: 0.5
+    restart: unless-stopped
   github-mcp:
     profiles: [mcp]
     build:
@@ -105,12 +119,15 @@ services:
         condition: service_started
       postgres:
         condition: service_healthy
-    networks: [agent_internal]
+    networks: [agent_internal, search_internal]
 networks:
   agent_internal:
     internal: true
   gateway_egress: {}
   github_egress: {}
+  search_internal:
+    internal: true
+  search_egress: {}
 volumes:
   damir_auth: {}
   damir_postgres: {}
