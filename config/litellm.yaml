@@ -1,4 +1,10 @@
 model_list:
+  - model_name: damir-memory-embedding
+    litellm_params:
+      model: ollama/embeddinggemma:300m
+      api_base: http://embeddings:11434
+    model_info:
+      mode: embedding
   - model_name: gpt-6.2-astra
     litellm_params:
       model: chatgpt/gpt-6.2-astra

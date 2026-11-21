@@ -60,6 +60,10 @@ git switch --track -c develop origin/develop
 2. Добавьте тесты нового поведения и ошибок. Внешние сервисы подменяйте
    тестовыми адаптерами в проверках контрактов.
 3. Запустите `dotnet run --project tests/ContractTests/ContractTests.csproj` и `dotnet build src/ai_agent/shared/Shared.csproj`.
+   При изменении ядра или памяти также запустите `dotnet run --project tests/CoreTests/CoreTests.csproj`
+   и `dotnet run --project tests/MemoryTests/MemoryTests.csproj`. Полный автономный
+   набор в Linux: `docker build -f docker/Dockerfile.tests -t personal-ai-agent-tests .`.
+   Проверки памяти с настоящей БД описаны в [SANDBOX.md](docs/SANDBOX.md#долговременная-память).
 4. Проверьте `git diff --check` и `git status`: секретов и локальных данных быть не должно.
 5. Обновите документацию с учётом фактически доступных возможностей.
 6. Откройте PR из своей feature-ветки в `develop`: проблема, изменение,
@@ -70,7 +74,9 @@ git switch --track -c develop origin/develop
 проверяется по мере появления реализаций. Общая очередь и порядок изменений
 истории одной сессии должны быть едиными для интерфейсов. Task Service / Worker
 сериализует всё выполнение Agent.run одной сессии; блокировки отдельных записей
-истории недостаточно. Сейчас это требование, очередь и worker не реализованы.
+истории недостаточно. Первоначальные API, очередь и Worker реализованы;
+запуск и проверки описаны в [BACKEND.md](docs/BACKEND.md).
+Демонстрационная консоль пока использует прямой запуск Core.
 Перенос из `develop`
 в `main` — через отдельный проверенный PR по решению команды.
 

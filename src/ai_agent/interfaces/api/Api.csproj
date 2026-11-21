@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../core/Core.csproj" />
+    <ProjectReference Include="../../gateway/Gateway.csproj" />
+    <ProjectReference Include="../../memory/Memory.csproj" />
+    <Compile Include="../../sandbox/*.cs" Link="Sandbox/%(Filename)%(Extension)" />
+    <Compile Include="../../tools/shell/*.cs" Link="Shell/%(Filename)%(Extension)" />
+    <Compile Include="../../tools/web/*.cs" Link="Web/%(Filename)%(Extension)" />
+    <Content Include="../../../../config/damir-persona.txt" Link="damir-persona.txt" CopyToOutputDirectory="PreserveNewest" />
+    <PackageReference Include="StackExchange.Redis" Version="3.4.35" />
+  </ItemGroup>
+</Project>

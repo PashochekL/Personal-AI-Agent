@@ -44,7 +44,7 @@ case "${1:-run}" in
     docker compose run --rm --no-deps --user 0 --entrypoint python gateway -c 'import os; os.chown("/tokens/chatgpt", 65532, 65532); os.chmod("/tokens/chatgpt", 0o700)'
     exec docker compose run --rm --no-deps --entrypoint python gateway -u -c 'from litellm.llms.chatgpt.authenticator import Authenticator; Authenticator().get_access_token(); print("Вход завершён. Сессия сохранена в отдельном томе Дамира.")'
     ;;
-  run)
+  run|backend)
     COMPOSE_PROGRESS=quiet
     COMPOSE_IGNORE_ORPHANS=true
     export COMPOSE_PROGRESS COMPOSE_IGNORE_ORPHANS
@@ -58,6 +58,10 @@ case "${1:-run}" in
       DAMIR_SESSION_ID=${DAMIR_SESSION_ID:-"workspace-$workspace_hash"}
     fi
     export DAMIR_WORKSPACE DAMIR_SESSION_ID
+    # Memory belongs to a project, not to an individual conversation.
+    memory_project_hash=$(printf '%s' "$DAMIR_WORKSPACE" | openssl dgst -sha256 | awk '{print $NF}')
+    DAMIR_MEMORY_PROJECT=${DAMIR_MEMORY_PROJECT:-"workspace-$memory_project_hash"}
+    export DAMIR_MEMORY_PROJECT
     DAMIR_SANDBOX_VOLUME="damir-ipc-$(openssl rand -hex 16)"
     DAMIR_MCP_VOLUME="damir-mcp-$(openssl rand -hex 16)"
     github_credentials() {
@@ -68,11 +72,19 @@ case "${1:-run}" in
       git credential-osxkeychain "$1"
     }
     github_key() { printf 'protocol=https\nhost=damir-github.local\nusername=damir\n\n'; }
-    if [ -z "${DAMIR_GITHUB_TOKEN:-}" ] && [ "$(uname -s)" = Darwin ]; then
+    if [ "${1:-run}" = run ] && [ -z "${DAMIR_GITHUB_TOKEN:-}" ] && [ "$(uname -s)" = Darwin ]; then
       DAMIR_GITHUB_TOKEN=$(github_key | github_credentials get 2>/dev/null | sed -n 's/^password=//p')
     fi
     DAMIR_GITHUB_MCP=0
     if [ -n "${DAMIR_GITHUB_TOKEN:-}" ]; then DAMIR_GITHUB_MCP=1; fi
+    if [ "${1:-run}" = backend ]; then
+      DAMIR_GITHUB_MCP=0
+      if [ -z "${DAMIR_BACKEND_API_KEY:-}" ]; then
+        if [ ! -s .uv-cache/damir-backend-key ]; then openssl rand -hex 32 > .uv-cache/damir-backend-key; fi
+        DAMIR_BACKEND_API_KEY=$(cat .uv-cache/damir-backend-key)
+      fi
+      export DAMIR_BACKEND_API_KEY
+    fi
     export DAMIR_GITHUB_TOKEN
     export DAMIR_SANDBOX_VOLUME DAMIR_MCP_VOLUME DAMIR_GITHUB_MCP
     sandbox_id=
@@ -88,18 +100,29 @@ case "${1:-run}" in
     trap 'exit 143' TERM
     docker compose build web-search
     docker compose up -d --wait gateway postgres web-search
+    if [ "${1:-run}" = backend ]; then docker compose up -d --wait redis; fi
+    if [ "${DAMIR_MEMORY_ENABLED:-1}" = 1 ]; then
+      docker compose up -d --wait memory-db embeddings
+      if ! docker compose exec -T embeddings ollama show embeddinggemma:300m >/dev/null 2>&1; then
+        docker compose exec -T embeddings ollama pull embeddinggemma:300m
+      fi
+    fi
     docker compose build shell-sandbox
     sandbox_id=$(docker compose run -d --rm --no-deps shell-sandbox)
     if [ "$DAMIR_GITHUB_MCP" = 1 ]; then
       docker compose build github-mcp
       github_id=$(docker compose run -d --rm --no-deps github-mcp)
     fi
+    if [ "${1:-run}" = backend ]; then
+      printf '%s\n' 'Backend: http://127.0.0.1:8080 (DAMIR_BACKEND_PORT меняет порт). Остановка: Ctrl+C.'
+      if docker compose run --no-deps --rm --build --service-ports backend; then exit 0; else exit $?; fi
+    fi
     while :; do
       if docker compose run --no-deps --rm --build agent; then result=0; else result=$?; fi
       case "$result" in
         71)
           if [ "$(uname -s)" != Darwin ]; then
-            printf '%s\n' 'Вход в этом скрипте доступен на macOS; на Windows используй damir.ps1.' >&2
+            printf '%s\n' 'Вход в этом скрипте доступен на macOS; на Windows используй damir.cmd.' >&2
             continue
           fi
           printf '%s' 'Вставь personal access token GitHub (ввод скрыт): '
@@ -141,7 +164,7 @@ case "${1:-run}" in
     done
     ;;
   *)
-    printf '%s\n' 'Использование: damir [login|auth-check|run]' >&2
+    printf '%s\n' 'Использование: damir [login|auth-check|run|backend]' >&2
     exit 2
     ;;
 esac
