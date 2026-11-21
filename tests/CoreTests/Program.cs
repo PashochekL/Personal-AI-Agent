@@ -4,6 +4,12 @@ using AiAgent.Shared;
 using Status = AiAgent.Shared.TaskStatus;
 
 if (Environment.GetEnvironmentVariable("DAMIR_TEST_GITHUB_MCP") == "1") { await McpChecks.GithubSmokeAsync(); return; }
+if (Environment.GetEnvironmentVariable("DAMIR_TEST_TERMINAL_PASTE") == "1")
+{
+    var terminalInput = await ConsoleInput.ReadAsync(Console.In, Console.Out, !Console.IsInputRedirected && !Console.IsOutputRedirected, CancellationToken.None);
+    Console.WriteLine(JsonSerializer.Serialize(new { terminalInput.Text, terminalInput.IsPaste, terminalInput.Incomplete }));
+    return;
+}
 
 var checks = 0;
 void Check(bool condition, string name) { checks++; if (!condition) throw new Exception($"Failed: {name}"); }
@@ -94,6 +100,13 @@ registry.Register(new BrokenTool());
 Check((await registry.ExecuteAsync(Call("1", "broken"))).Error == "Tool execution failed", "tool exception");
 result = await new Agent(new BrokenModel(), new Store(), Registry()).RunAsync("s", "go");
 Check(result.Status == Status.FAILED && !result.Error!.Contains("secret"), "gateway failure");
+store = new Store();
+result = await new Agent(new ToolThenGatewayFailure(), store, Registry()).RunAsync("s", "list skills");
+Check(result.Status == Status.FAILED && result.Error!.Contains("формат") && store.Messages.Select(m => m.Role).SequenceEqual(["user", "assistant", "tool"]), "gateway format failure after tool is explained without losing its result");
+result = await new Agent(new SpecificGatewayFailure(new AgentError("LLM gateway returned HTTP 429")), new Store(), Registry()).RunAsync("s", "go");
+Check(result.Error!.Contains("HTTP 429"), "safe gateway HTTP status shown");
+result = await new Agent(new SpecificGatewayFailure(new AgentError("LLM gateway returned HTTP 429 secret")), new Store(), Registry()).RunAsync("s", "go");
+Check(!result.Error!.Contains("secret") && !result.Error.Contains("429"), "untrusted gateway error text not exposed");
 
 using (var cancelled = new CancellationTokenSource())
 {
@@ -152,7 +165,11 @@ Console.WriteLine($"{await ContextChecks.RunAsync()} context checks passed");
 Console.WriteLine($"{await ShellChecks.RunAsync()} shell checks passed");
 Console.WriteLine($"{await McpChecks.RunAsync()} MCP checks passed");
 Console.WriteLine($"{await ProgressChecks.RunAsync()} progress checks passed");
+Console.WriteLine($"{await ConsoleInputChecks.RunAsync()} console input checks passed");
+Console.WriteLine($"{StartupBannerChecks.Run()} startup banner checks passed");
+Console.WriteLine($"{await SkillMenuChecks.RunAsync()} skill menu checks passed");
 Console.WriteLine($"{ContextPolicyChecks.Run()} context policy checks passed");
+Console.WriteLine($"{await WebSearchChecks.RunAsync()} web search checks passed");
 
 sealed class Echo : ITool
 {
@@ -190,6 +207,19 @@ sealed class Model(params LlmResponse[] responses) : ILlmClient
 sealed class BrokenModel : ILlmClient
 {
     public Task<LlmResponse> CompleteAsync(IReadOnlyList<Message> messages, IReadOnlyList<ToolDefinition> tools, CancellationToken cancellationToken = default) => throw new AgentError("secret");
+}
+sealed class ToolThenGatewayFailure : ILlmClient
+{
+    private int _calls;
+    public Task<LlmResponse> CompleteAsync(IReadOnlyList<Message> messages, IReadOnlyList<ToolDefinition> tools, CancellationToken cancellationToken = default)
+    {
+        if (_calls++ > 0) throw new AgentError("LLM gateway request failed", new JsonException("private data"));
+        return Task.FromResult(new LlmResponse { ToolCalls = [new ToolCall { Id = "1", Name = "echo", Arguments = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>("{\"text\":\"ok\"}")! }] });
+    }
+}
+sealed class SpecificGatewayFailure(AgentError failure) : ILlmClient
+{
+    public Task<LlmResponse> CompleteAsync(IReadOnlyList<Message> messages, IReadOnlyList<ToolDefinition> tools, CancellationToken cancellationToken = default) => throw failure;
 }
 sealed class BrokenTool : ITool
 {

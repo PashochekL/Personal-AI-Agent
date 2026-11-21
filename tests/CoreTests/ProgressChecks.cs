@@ -18,6 +18,12 @@ internal static class ProgressChecks
         using var quietOutput = new StringWriter();
         await using (var quiet = new ConsoleProgress(quietOutput, false)) { quiet.Model(); quiet.Tool("test"); }
         if (quietOutput.ToString().Length != 0) throw new Exception("Redirected output must stay clean");
+        using var skillOutput = new StringWriter();
+        await using (var skillProgress = new ConsoleProgress(skillOutput, true)) { skillProgress.SkillLoaded("test-skill"); }
+        if (!skillOutput.ToString().Contains("Скилл загружен: test-skill" + Environment.NewLine, StringComparison.Ordinal)) throw new Exception("Skill notification not printed");
+        using var redirected = new StringWriter();
+        await using (var quiet = new ConsoleProgress(redirected, false)) { quiet.SkillLoaded("test-skill"); }
+        if (redirected.ToString() != "Скилл загружен: test-skill" + Environment.NewLine) throw new Exception("Skill notification missing from redirected output");
         var names = new List<string>();
         var registry = new ToolRegistry(names.Add);
         registry.Register(new Echo());
@@ -29,6 +35,6 @@ internal static class ProgressChecks
         var faulty = new ToolRegistry(_ => throw new InvalidOperationException());
         faulty.Register(new Echo());
         if (!(await faulty.ExecuteAsync(call)).Success) throw new Exception("Progress reporting disrupted tool");
-        return 5;
+        return 7;
     }
 }

@@ -22,11 +22,16 @@ public sealed class InstructionLoader(Workspace workspace)
         var dirs = new List<string> { "." };
         foreach (var segment in segments) dirs.Add(Path.Combine(dirs[^1], segment));
         var result = new List<InstructionFile>();
+        var projectFile = Path.Combine(".agents", "AGENTS.md");
+        var projectAbsolute = workspace.Resolve(projectFile);
+        if (File.Exists(projectAbsolute))
+            result.Add(new InstructionFile(projectFile, await WorkspaceText.ReadAsync(workspace, projectFile, cancellationToken)));
         foreach (var dir in dirs)
         {
             cancellationToken.ThrowIfCancellationRequested();
             var file = Path.Combine(dir, "AGENTS.md");
             var absolute = workspace.Resolve(file);
+            if (absolute == projectAbsolute) continue;
             if (!File.Exists(absolute)) continue;
             var content = await WorkspaceText.ReadAsync(workspace, file, cancellationToken);
             result.Add(new InstructionFile(file, content));
@@ -35,34 +40,52 @@ public sealed class InstructionLoader(Workspace workspace)
     }
 }
 
-/// <summary>Discovers one-level skills under skills/ and loads an individual skill on demand.</summary>
-public sealed class SkillCatalog(Workspace workspace)
+/// <summary>Discovers skills under .agents/skills/ with legacy skills/ as a fallback.</summary>
+public sealed class SkillCatalog(Workspace workspace, Action<string>? onLoaded = null)
 {
+    private static readonly string[] Roots = [Path.Combine(".agents", "skills"), "skills"];
     public async Task<IReadOnlyList<SkillMetadata>> ListAsync(CancellationToken cancellationToken = default)
     {
-        var root = workspace.Resolve("skills");
-        if (!Directory.Exists(root)) return [];
         var skills = new List<SkillMetadata>();
-        foreach (var directory in Directory.EnumerateDirectories(root).Order(StringComparer.Ordinal))
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var relativeRoot in Roots)
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            if (skills.Count >= 100) throw new InvalidOperationException("Too many skills");
-            var name = Path.GetFileName(directory);
-            var path = Path.Combine("skills", name, "SKILL.md");
-            var absolute = workspace.Resolve(path);
-            if (!File.Exists(absolute)) continue;
-            var text = await WorkspaceText.ReadAsync(workspace, path, cancellationToken);
-            skills.Add(Parse(name, path, text));
+            var root = workspace.Resolve(relativeRoot);
+            if (!Directory.Exists(root)) continue;
+            foreach (var directory in Directory.EnumerateDirectories(root).Order(StringComparer.Ordinal))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var name = Path.GetFileName(directory);
+                if (seen.Contains(name)) continue;
+                var path = Path.Combine(relativeRoot, name, "SKILL.md");
+                var absolute = workspace.Resolve(path);
+                if (!File.Exists(absolute)) continue;
+                if (skills.Count >= 100) throw new InvalidOperationException("Too many skills");
+                var text = await WorkspaceText.ReadAsync(workspace, path, cancellationToken);
+                skills.Add(Parse(name, path, text));
+                seen.Add(name);
+            }
         }
-        return skills;
+        return skills.OrderBy(skill => skill.Name, StringComparer.Ordinal).ToArray();
+    }
+
+    public string GetPath(string name)
+    {
+        ValidateName(name);
+        foreach (var root in Roots)
+        {
+            var path = Path.Combine(root, name, "SKILL.md");
+            if (File.Exists(workspace.Resolve(path))) return path;
+        }
+        return Path.Combine(Roots[0], name, "SKILL.md");
     }
 
     public async Task<string> LoadAsync(string name, CancellationToken cancellationToken = default)
     {
-        ValidateName(name);
-        var path = Path.Combine("skills", name, "SKILL.md");
+        var path = GetPath(name);
         var text = await WorkspaceText.ReadAsync(workspace, path, cancellationToken);
         _ = Parse(name, path, text);
+        try { onLoaded?.Invoke(name); } catch (Exception) { /* Notifications must not affect skill loading. */ }
         return text;
     }
 
@@ -131,7 +154,7 @@ public sealed class SkillTool(SkillCatalog catalog, bool list) : ITool
             {
                 if (!arguments.TryGetValue("name", out var value) || value.ValueKind != JsonValueKind.String) throw new ArgumentException("Skill name is required");
                 var name = value.GetString()!;
-                content = $"Skill path: skills/{name}/SKILL.md\n" + await catalog.LoadAsync(name, cancellationToken);
+                content = $"Skill path: {catalog.GetPath(name)}\n" + await catalog.LoadAsync(name, cancellationToken);
             }
             return new ToolResult { Success = true, Content = content };
         }

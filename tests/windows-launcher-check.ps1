@@ -8,6 +8,7 @@ $oldLog = $env:DAMIR_TEST_LOG
 $oldFail = $env:DAMIR_TEST_FAIL
 $oldWorkspaceLog = $env:DAMIR_TEST_WORKSPACE_LOG
 $oldSession = $env:DAMIR_SESSION_ID
+$oldGithubToken = $env:DAMIR_GITHUB_TOKEN
 $pwsh = (Get-Command pwsh -CommandType Application).Source | Select-Object -First 1
 try {
     $fakeBin = Join-Path $fixtureDir 'bin'
@@ -19,11 +20,16 @@ try {
     $env:DAMIR_TEST_LOG = Join-Path $fixtureDir 'calls.log'
     $env:DAMIR_TEST_WORKSPACE_LOG = Join-Path $fixtureDir 'workspace.log'
     $env:DAMIR_SESSION_ID = ''
+    $env:DAMIR_GITHUB_TOKEN = ''
     $env:DAMIR_TIMEZONE = 'Asia/Tomsk'
     if ($IsWindows) {
+        [IO.File]::WriteAllText((Join-Path $fakeBin 'git.cmd'), "@echo off`r`nexit /b 1`r`n")
         $fakeDocker = Join-Path $fakeBin 'docker.cmd'
         [IO.File]::WriteAllText($fakeDocker, "@echo off`r`necho %*>>`"%DAMIR_TEST_LOG%`"`r`necho %DAMIR_WORKSPACE%^|%DAMIR_SESSION_ID%>>`"%DAMIR_TEST_WORKSPACE_LOG%`"`r`nif `"%DAMIR_TEST_FAIL%`"==`"1`" exit /b 23`r`necho test-sandbox-id`r`nexit /b 0`r`n")
     } else {
+        $fakeGit = Join-Path $fakeBin 'git'
+        [IO.File]::WriteAllText($fakeGit, "#!/bin/sh`nexit 1`n", [Text.UTF8Encoding]::new($false))
+        & chmod 700 $fakeGit
         $fakeDocker = Join-Path $fakeBin 'docker'
         $mock = @'
 #!/bin/sh
@@ -43,7 +49,7 @@ exit 0
     $output = (& $pwsh -NoLogo -NoProfile -File $launcher run 2>&1 | Out-String)
     if ($LASTEXITCODE -ne 0) { throw "Команда run завершилась ошибкой: $output" }
     $calls = [IO.File]::ReadAllLines($env:DAMIR_TEST_LOG)
-    if ($calls.Count -ne 6 -or $calls[0] -notlike 'compose up -d --wait gateway postgres*' -or $calls[1] -notlike 'compose build shell-sandbox*' -or $calls[2] -notlike '*shell-sandbox*' -or $calls[3] -notlike 'compose run --no-deps --rm --build agent*' -or $calls[4] -notlike 'stop test-sandbox-id*' -or $calls[5] -notlike 'volume rm damir-ipc-*') { throw 'Неверная последовательность запуска.' }
+    if ($calls.Count -ne 8 -or $calls[0] -notlike 'compose build web-search*' -or $calls[1] -notlike 'compose up -d --wait gateway postgres web-search*' -or $calls[2] -notlike 'compose build shell-sandbox*' -or $calls[3] -notlike '*shell-sandbox*' -or $calls[4] -notlike 'compose run --no-deps --rm --build agent*' -or $calls[5] -notlike 'stop test-sandbox-id*' -or $calls[6] -notlike 'volume rm damir-ipc-*' -or $calls[7] -notlike 'volume rm damir-mcp-*') { throw 'Неверная последовательность запуска.' }
     $key = [IO.File]::ReadAllText((Join-Path $fixtureDir '.uv-cache/damir-gateway-key')).Trim()
     $password = [IO.File]::ReadAllText((Join-Path $fixtureDir '.uv-cache/damir-db-password')).Trim()
     if ($key -notmatch '^sk-[0-9a-f]{64}$' -or $password -notmatch '^[0-9a-f]{64}$' -or $output.Contains($key) -or $output.Contains($password)) { throw 'Ошибка генерации или вывода локальных ключей.' }
@@ -75,7 +81,7 @@ exit 0
     [IO.File]::WriteAllText($env:DAMIR_TEST_LOG, '')
     $env:DAMIR_TEST_FAIL = '1'
     $null = & $pwsh -NoLogo -NoProfile -File $launcher run
-    if ($LASTEXITCODE -ne 23 -or [IO.File]::ReadAllLines($env:DAMIR_TEST_LOG).Count -ne 2) { throw 'Ошибка Docker не остановила запуск.' }
+    if ($LASTEXITCODE -ne 23 -or [IO.File]::ReadAllLines($env:DAMIR_TEST_LOG).Count -ne 3) { throw 'Ошибка Docker не остановила запуск.' }
     Write-Host "Проверки запуска PowerShell пройдены: $([System.Runtime.InteropServices.RuntimeInformation]::OSDescription)"
 } finally {
     $env:PATH = $oldPath
@@ -84,5 +90,6 @@ exit 0
     $env:DAMIR_TEST_FAIL = $oldFail
     $env:DAMIR_TEST_WORKSPACE_LOG = $oldWorkspaceLog
     $env:DAMIR_SESSION_ID = $oldSession
+    $env:DAMIR_GITHUB_TOKEN = $oldGithubToken
     if ([IO.Directory]::Exists($fixtureDir)) { [IO.Directory]::Delete($fixtureDir, $true) }
 }

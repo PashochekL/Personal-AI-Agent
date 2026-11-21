@@ -34,18 +34,25 @@ static class InstructionChecks
             Check(loaded.Success && loaded.Content.Contains("SECRET SKILL BODY"), "skill tool loads body");
             var selectedModel = new Model(new LlmResponse { Content = "selected skill answer" });
             var selectedStore = new Store();
-            var selectedAgent = new Agent(selectedModel, selectedStore, new ToolRegistry(), workspace: workspace);
+            var notifications = new List<string>();
+            var selectedAgent = new Agent(selectedModel, selectedStore, new ToolRegistry(), workspace: workspace, onSkillLoaded: notifications.Add);
             var selectedResult = await selectedAgent.RunWithSkillAsync("selected", "perform task", "helpful-skill");
             Check(selectedResult.Status == Status.COMPLETED && selectedModel.Requests[0].Any(m => m.Content?.Contains("SECRET SKILL BODY") == true) && selectedModel.Requests[0][^1].Content == "perform task", "selected skill loaded before request without tool call");
+            Check(notifications.SequenceEqual(["helpful-skill"]), "manual skill load reported once");
             Check(selectedStore.Messages.All(m => m.Content?.Contains("SECRET SKILL BODY") != true), "selected skill body is not recorded as a user message");
             var invalidModel = new Model();
-            var invalidAgent = new Agent(invalidModel, new Store(), new ToolRegistry(), workspace: workspace);
+            notifications.Clear();
+            var invalidAgent = new Agent(invalidModel, new Store(), new ToolRegistry(), workspace: workspace, onSkillLoaded: notifications.Add);
             Check((await invalidAgent.RunWithSkillAsync("s", "task", "../escape")).Status == Status.FAILED && invalidModel.Requests.Count == 0, "selected skill traversal rejected before model call");
+            Check(notifications.Count == 0, "failed skill load not reported");
             var automaticCall = new ToolCall { Id = "skill-1", Name = "skills.load", Arguments = new Dictionary<string, JsonElement> { ["name"] = JsonSerializer.SerializeToElement("helpful-skill") } };
             var autoModel = new Model(new LlmResponse { ToolCalls = [automaticCall] }, new LlmResponse { Content = "loaded" });
             var autoStore = new Store();
-            var autoResult = await new Agent(autoModel, autoStore, new ToolRegistry(), workspace: workspace).RunAsync("auto", "help with a task");
+            var autoResult = await new Agent(autoModel, autoStore, new ToolRegistry(), workspace: workspace, onSkillLoaded: notifications.Add).RunAsync("auto", "help with a task");
             Check(autoResult.Status == Status.COMPLETED && autoStore.Messages.Any(m => m.Role == "tool" && m.Content?.Contains("SECRET SKILL BODY") == true), "model can load a skill using tool calling");
+            Check(notifications.SequenceEqual(["helpful-skill"]), "automatic skill load reported once");
+            var throwingCatalog = new SkillCatalog(workspace, _ => throw new InvalidOperationException());
+            Check((await throwingCatalog.LoadAsync("helpful-skill")).Contains("SECRET SKILL BODY"), "notification failure does not affect skill loading");
             try { await catalog.LoadAsync("../escape"); throw new Exception("Traversal accepted"); } catch (ArgumentException) { checks++; }
             Directory.CreateDirectory(Path.Combine(root, "skills", "bad-skill"));
             await File.WriteAllTextAsync(Path.Combine(root, "skills", "bad-skill", "SKILL.md"), "---\nname: other\ndescription: x\n---\nbody");
@@ -76,6 +83,32 @@ static class InstructionChecks
             batchRegistry.Register(new ReadFileTool(workspace));
             _ = await new Agent(batchModel, batchStore, batchRegistry, workspace: workspace).RunAsync("s", "read");
             Check(batchStore.Messages[2].Content!.Contains("nested rule") && batchStore.Messages[3].Content!.Contains("nested rule"), "parallel calls do not bypass instruction delivery");
+
+            Directory.CreateDirectory(Path.Combine(root, ".agents", "skills", "helpful-skill"));
+            Directory.CreateDirectory(Path.Combine(root, ".agents", "skills", "new-skill"));
+            Directory.CreateDirectory(Path.Combine(root, "skills", "legacy-skill"));
+            await File.WriteAllTextAsync(Path.Combine(root, ".agents", "AGENTS.md"), "project agents rule");
+            await File.WriteAllTextAsync(Path.Combine(root, ".agents", "skills", "helpful-skill", "SKILL.md"), "---\nname: helpful-skill\ndescription: preferred\n---\nNEW SKILL BODY");
+            await File.WriteAllTextAsync(Path.Combine(root, ".agents", "skills", "new-skill", "SKILL.md"), "---\nname: new-skill\ndescription: new\n---\nNEW ONLY");
+            await File.WriteAllTextAsync(Path.Combine(root, "skills", "legacy-skill", "SKILL.md"), "---\nname: legacy-skill\ndescription: legacy\n---\nLEGACY ONLY");
+            var combined = await loader.LoadForPathAsync("src/nested/file.txt");
+            Check(combined.Count == 4 && combined[0].Content == "project agents rule" && combined[1].Content == "root rule" && combined[^1].Content == "deep rule", ".agents instructions precede standard hierarchy");
+            Check((await loader.LoadForPathAsync(".agents")).Count(x => x.Content == "project agents rule") == 1, ".agents instructions not duplicated");
+            var newSkills = await catalog.ListAsync();
+            Check(newSkills.Count == 3 && newSkills.Single(x => x.Name == "helpful-skill").Path == Path.Combine(".agents", "skills", "helpful-skill", "SKILL.md"), "new location takes precedence and legacy skills remain listed");
+            Check((await catalog.LoadAsync("helpful-skill")).Contains("NEW SKILL BODY") && (await catalog.LoadAsync("new-skill")).Contains("NEW ONLY"), "new skills loaded on demand");
+            Check((await catalog.LoadAsync("legacy-skill")).Contains("LEGACY ONLY"), "legacy skill remains loadable");
+            var preferredResult = await skillTool.ExecuteAsync(new Dictionary<string, JsonElement> { ["name"] = JsonSerializer.SerializeToElement("helpful-skill") });
+            Check(preferredResult.Content.Contains(Path.Combine(".agents", "skills", "helpful-skill", "SKILL.md")) && preferredResult.Content.Contains("NEW SKILL BODY"), "tool returns real skill path");
+            var preferredModel = new Model(new LlmResponse { Content = "ok" });
+            var preferredAgent = new Agent(preferredModel, new Store(), new ToolRegistry(), workspace: workspace);
+            await preferredAgent.RunWithSkillAsync("s", "task", "helpful-skill");
+            Check(preferredModel.Requests[0].Any(m => m.Content?.Contains("NEW SKILL BODY") == true && m.Content.Contains(Path.Combine(".agents", "skills", "helpful-skill"))), "manual selection includes actual skill directory");
+            var newCall = new ToolCall { Id = "new-skill-call", Name = "skills.load", Arguments = new Dictionary<string, JsonElement> { ["name"] = JsonSerializer.SerializeToElement("new-skill") } };
+            var newModel = new Model(new LlmResponse { ToolCalls = [newCall] }, new LlmResponse { Content = "done" });
+            var newStore = new Store();
+            await new Agent(newModel, newStore, new ToolRegistry(), workspace: workspace).RunAsync("s", "task");
+            Check(newStore.Messages.Any(m => m.Role == "tool" && m.Content?.Contains("NEW ONLY") == true), "model can automatically load skill from .agents");
             return checks;
         }
         finally { Directory.Delete(root, true); }
