@@ -5,6 +5,7 @@
 !.env.example
 .git/
 .uv-cache/
+.dotnet/
 .venv/
 workspace/
 .idea/

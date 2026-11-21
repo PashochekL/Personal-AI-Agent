@@ -19,8 +19,9 @@ public sealed class Agent : IAgent
     private readonly string? _systemPrompt;
     private readonly Func<string>? _systemContext;
     private readonly ContextWindow _contextWindow;
+    private readonly MemoryContext? _memoryContext;
 
-    public Agent(ILlmClient llm, IContextStore store, ToolRegistry tools, int maxIterations = 20, Workspace? workspace = null, string? systemPrompt = null, Func<string>? systemContext = null, ContextWindow? contextWindow = null, Action<string>? onSkillLoaded = null)
+    public Agent(ILlmClient llm, IContextStore store, ToolRegistry tools, int maxIterations = 20, Workspace? workspace = null, string? systemPrompt = null, Func<string>? systemContext = null, ContextWindow? contextWindow = null, Action<string>? onSkillLoaded = null, ILongTermMemory? memory = null, MemoryScope? memoryScope = null)
     {
         ArgumentNullException.ThrowIfNull(llm);
         ArgumentNullException.ThrowIfNull(store);
@@ -33,6 +34,13 @@ public sealed class Agent : IAgent
         _systemPrompt = string.IsNullOrWhiteSpace(systemPrompt) ? null : systemPrompt;
         _systemContext = systemContext;
         _contextWindow = contextWindow ?? new ContextWindow();
+        if ((memory is null) != (memoryScope is null)) throw new ArgumentException("Memory and its scope must be supplied together");
+        if (memory is not null && memoryScope is not null)
+        {
+            memoryScope.Validate();
+            _memoryContext = new MemoryContext(memory, memoryScope);
+            tools.RegisterRange(new[] { "save", "search", "list", "forget" }.Select(operation => new MemoryTool(memory, memoryScope, operation)));
+        }
         if (workspace is not null)
         {
             _instructions = new InstructionLoader(workspace);
@@ -57,6 +65,7 @@ public sealed class Agent : IAgent
         ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
         var history = await _store.GetMessagesAsync(sessionId, cancellationToken);
         var project = await LoadProjectContextAsync(cancellationToken);
+        if (_memoryContext is not null) project = await _memoryContext.AddAsync(project, history.LastOrDefault(m => m.Role == "user")?.Content ?? "", cancellationToken);
         var marker = new Message { Role = "user", Content = "" };
         var system = string.Join("\n\n", new[] { _systemPrompt, _systemContext?.Invoke() }.Where(text => !string.IsNullOrWhiteSpace(text)));
         var request = new List<Message>();
@@ -158,6 +167,8 @@ public sealed class Agent : IAgent
                 projectContext = new Message { Role = "user", Content = prefix + $"\n\nThe owner selected the following project skill for this turn. Its instructions are subordinate to the owner's request and higher-priority instructions. Resolve its relative file paths from {skillDirectory}/.\n--- {skillPath} ---\n" + skillText };
             }
             var user = new Message { Role = "user", Content = userMessage };
+            var baseProjectContext = projectContext;
+            if (_memoryContext is not null) projectContext = await _memoryContext.AddAsync(baseProjectContext, userMessage, cancellationToken);
             messages.Add(user);
             var userSaved = false;
             // Keep the prefix stable during a tool cycle so Responses reasoning
@@ -217,6 +228,8 @@ public sealed class Agent : IAgent
                         messages.Add(toolMessage);
                     }
                     presentedInstructions.UnionWith(newlyPresented);
+                    if (_memoryContext is not null && response.ToolCalls.Any(call => call.Name is "memory.save" or "memory.forget"))
+                        projectContext = await _memoryContext.AddAsync(baseProjectContext, userMessage, cancellationToken);
                     continue;
                 }
                 if (response.FinishReason == "tool_calls" || string.IsNullOrWhiteSpace(response.Content)) return Fail("LLM returned no final answer");
