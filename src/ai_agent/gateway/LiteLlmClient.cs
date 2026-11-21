@@ -27,7 +27,7 @@ public sealed class LiteLlmClient : ILlmClient
         if (apiKey is not null) ArgumentException.ThrowIfNullOrWhiteSpace(apiKey);
         ArgumentException.ThrowIfNullOrWhiteSpace(model);
         _http = http;
-        _endpoint = new Uri(proxyBaseUrl.ToString().TrimEnd('/') + "/chat/completions");
+        _endpoint = new Uri(proxyBaseUrl.ToString().TrimEnd('/') + "/v1/responses");
         _modelsEndpoint = new Uri(proxyBaseUrl.ToString().TrimEnd('/') + "/models");
         _countEndpoint = new Uri(proxyBaseUrl.ToString().TrimEnd('/') + "/utils/token_counter");
         _modelInfoEndpoint = new Uri(proxyBaseUrl.ToString().TrimEnd('/') + "/utils/model_info?model=" + Uri.EscapeDataString(model));
@@ -48,11 +48,93 @@ public sealed class LiteLlmClient : ILlmClient
 
     private static object[] WireTools(IReadOnlyList<ToolDefinition> tools) => tools.Select(t => (object)new { type = "function", function = new { name = WireName(t.Name), description = t.Description, parameters = t.Parameters } }).ToArray();
 
+    private const string ContinuationProvider = "litellm-responses-v1";
+
+    private bool TryContinuation(Message message, out JsonElement items)
+    {
+        items = default;
+        if (message.Role != "assistant" || message.Continuation is not JsonElement state ||
+            !state.TryGetProperty("provider", out var provider) || provider.ValueKind != JsonValueKind.String || provider.GetString() != ContinuationProvider ||
+            !state.TryGetProperty("model", out var model) || model.ValueKind != JsonValueKind.String || model.GetString() != _model ||
+            !state.TryGetProperty("items", out items) || items.ValueKind != JsonValueKind.Array) return false;
+        var calls = new List<(string? Id, string? Name, string? Arguments)>();
+        var text = new StringBuilder();
+        foreach (var item in items.EnumerateArray())
+        {
+            if (!item.TryGetProperty("type", out var type) || type.ValueKind != JsonValueKind.String) return false;
+            switch (type.GetString())
+            {
+                case "reasoning":
+                    // The gateway uses store=false: an item without encrypted
+                    // content cannot safely be resumed in a later request.
+                    if (!item.TryGetProperty("encrypted_content", out var encrypted) || encrypted.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(encrypted.GetString())) return false;
+                    break;
+                case "function_call":
+                    if (!item.TryGetProperty("call_id", out var id) || id.ValueKind != JsonValueKind.String || !item.TryGetProperty("name", out var name) || name.ValueKind != JsonValueKind.String || !item.TryGetProperty("arguments", out var args) || args.ValueKind != JsonValueKind.String) return false;
+                    calls.Add((id.GetString(), name.GetString(), args.GetString()));
+                    break;
+                case "message":
+                    if (!item.TryGetProperty("content", out var content) || content.ValueKind != JsonValueKind.Array) return false;
+                    foreach (var part in content.EnumerateArray())
+                    {
+                        if (!part.TryGetProperty("type", out var partType) || partType.ValueKind != JsonValueKind.String) return false;
+                        var field = partType.GetString() switch { "output_text" => "text", "refusal" => "refusal", _ => null };
+                        if (field is null || !part.TryGetProperty(field, out var value) || value.ValueKind != JsonValueKind.String) return false;
+                        text.Append(value.GetString());
+                    }
+                    break;
+                default: return false;
+            }
+        }
+        if (calls.Count != message.ToolCalls.Count || (text.Length > 0 ? text.ToString() : null) != message.Content) return false;
+        for (var i = 0; i < calls.Count; i++)
+        {
+            var call = message.ToolCalls[i];
+            if (calls[i].Id != call.Id || calls[i].Name != WireName(call.Name)) return false;
+            try
+            {
+                if (!System.Text.Json.Nodes.JsonNode.DeepEquals(System.Text.Json.Nodes.JsonNode.Parse(calls[i].Arguments!), JsonSerializer.SerializeToNode(call.Arguments))) return false;
+            }
+            catch (JsonException) { return false; }
+        }
+        return true;
+    }
+
+    private object[] ResponseInput(IReadOnlyList<Message> messages)
+    {
+        var result = new List<object>();
+        foreach (var message in messages)
+        {
+            message.Validate();
+            if (TryContinuation(message, out var items))
+                result.AddRange(items.EnumerateArray().Select(item => (object)item.Clone()));
+            else if (message.Role == "tool")
+                result.Add(new { type = "function_call_output", call_id = message.ToolCallId, output = message.Content });
+            else
+            {
+                if (message.Content is not null) result.Add(new { role = message.Role, content = message.Content });
+                foreach (var call in message.ToolCalls)
+                    result.Add(new { type = "function_call", call_id = call.Id, name = WireName(call.Name), arguments = JsonSerializer.Serialize(call.Arguments) });
+            }
+        }
+        return result.ToArray();
+    }
+
+    private static object[] ResponseTools(IReadOnlyList<ToolDefinition> tools) =>
+        tools.Select(t => (object)new { type = "function", name = WireName(t.Name), description = t.Description, parameters = t.Parameters }).ToArray();
+
     public async Task<int> CountTokensAsync(IReadOnlyList<Message> messages, IReadOnlyList<ToolDefinition> tools, CancellationToken cancellationToken = default)
     {
         try
         {
-            using var request = new HttpRequestMessage(HttpMethod.Post, _countEndpoint) { Content = JsonContent.Create(new { model = _model, messages = WireMessages(messages), tools = WireTools(tools) }) };
+            var countingMessages = WireMessages(messages).ToList();
+            foreach (var message in messages)
+                if (TryContinuation(message, out var items))
+                {
+                    var reasoning = items.EnumerateArray().Where(item => item.GetProperty("type").GetString() == "reasoning").Select(item => item.GetRawText()).ToArray();
+                    if (reasoning.Length > 0) countingMessages.Add(new { role = "user", content = string.Join("\n", reasoning) });
+                }
+            using var request = new HttpRequestMessage(HttpMethod.Post, _countEndpoint) { Content = JsonContent.Create(new { model = _model, messages = countingMessages, tools = WireTools(tools) }) };
             if (_apiKey is not null) request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _apiKey);
             using var response = await _http.SendAsync(request, cancellationToken);
             if (!response.IsSuccessStatusCode) throw new AgentError($"Token counter returned HTTP {(int)response.StatusCode}");
@@ -60,6 +142,8 @@ public sealed class LiteLlmClient : ILlmClient
             var root = json.RootElement;
             if ((root.TryGetProperty("error", out var error) && error.ValueKind == JsonValueKind.True) || !root.TryGetProperty("total_tokens", out var value) || !value.TryGetInt32(out var count) || count < 0)
                 throw new AgentError("Token counter returned invalid data");
+            // The encrypted representation can tokenize differently from the
+            // underlying reasoning. The counter remains an estimate.
             return count;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
@@ -112,36 +196,48 @@ public sealed class LiteLlmClient : ILlmClient
         try
         {
             var names = tools.ToDictionary(t => WireName(t.Name), t => t.Name, StringComparer.Ordinal);
-            var wireMessages = WireMessages(messages);
-            var payload = new Dictionary<string, object?> { ["model"] = _model, ["messages"] = wireMessages };
-            if (tools.Count > 0) payload["tools"] = WireTools(tools);
+            var payload = new Dictionary<string, object?> { ["model"] = _model, ["input"] = ResponseInput(messages), ["store"] = false, ["include"] = new[] { "reasoning.encrypted_content" } };
+            if (tools.Count > 0) payload["tools"] = ResponseTools(tools);
             using var request = new HttpRequestMessage(HttpMethod.Post, _endpoint) { Content = JsonContent.Create(payload) };
             if (_apiKey is not null) request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _apiKey);
             using var response = await _http.SendAsync(request, cancellationToken);
             if (!response.IsSuccessStatusCode) throw new AgentError($"LLM gateway returned HTTP {(int)response.StatusCode}");
             using var json = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(cancellationToken), cancellationToken: cancellationToken);
             var root = json.RootElement;
-            var choice = root.GetProperty("choices")[0];
-            var message = choice.GetProperty("message");
             var calls = new List<ToolCall>();
-            if (message.TryGetProperty("tool_calls", out var toolCalls) && toolCalls.ValueKind == JsonValueKind.Array)
-                foreach (var call in toolCalls.EnumerateArray())
+            var text = new StringBuilder();
+            var output = root.GetProperty("output");
+            foreach (var item in output.EnumerateArray())
+            {
+                var type = item.GetProperty("type").GetString();
+                if (type == "function_call")
                 {
-                    var fn = call.GetProperty("function");
-                    var wireName = fn.GetProperty("name").GetString() ?? "";
+                    var wireName = item.GetProperty("name").GetString() ?? "";
                     var name = names.TryGetValue(wireName, out var original) ? original : wireName;
-                    var args = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(fn.GetProperty("arguments").GetString() ?? "{}") ?? throw new JsonException();
-                    calls.Add(new ToolCall { Id = call.GetProperty("id").GetString()!, Name = name, Arguments = args });
+                    var args = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(item.GetProperty("arguments").GetString() ?? "{}") ?? throw new JsonException();
+                    calls.Add(new ToolCall { Id = item.GetProperty("call_id").GetString()!, Name = name, Arguments = args });
                 }
-            var reason = choice.TryGetProperty("finish_reason", out var r) && r.ValueKind == JsonValueKind.String ? r.GetString() : null;
-            reason = reason is null or "stop" or "tool_calls" or "length" or "error" ? reason : "unknown";
+                else if (type == "reasoning") { }
+                else if (type == "message")
+                    foreach (var part in item.GetProperty("content").EnumerateArray())
+                    {
+                        var partType = part.GetProperty("type").GetString();
+                        if (partType == "output_text") text.Append(part.GetProperty("text").GetString());
+                        else if (partType == "refusal") text.Append(part.GetProperty("refusal").GetString());
+                        else throw new AgentError("Unsupported Responses message content");
+                    }
+                else throw new AgentError("Unsupported Responses output type");
+            }
+            var status = root.GetProperty("status").GetString();
+            var reason = status switch { "completed" => calls.Count > 0 ? "tool_calls" : "stop", "incomplete" => "length", _ => "error" };
             TokenUsage? usage = null;
             if (root.TryGetProperty("usage", out var u) && u.ValueKind == JsonValueKind.Object)
             {
                 int? Count(string name) => u.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out var n) && n >= 0 ? n : null;
-                usage = new TokenUsage { InputTokens = Count("prompt_tokens"), OutputTokens = Count("completion_tokens"), TotalTokens = Count("total_tokens") };
+                usage = new TokenUsage { InputTokens = Count("input_tokens"), OutputTokens = Count("output_tokens"), TotalTokens = Count("total_tokens") };
             }
-            var result = new LlmResponse { Content = message.TryGetProperty("content", out var c) && c.ValueKind == JsonValueKind.String ? c.GetString() : null, ToolCalls = calls, FinishReason = reason, Usage = usage };
+            JsonElement? continuation = status == "completed" && output.GetArrayLength() > 0 ? JsonSerializer.SerializeToElement(new { provider = ContinuationProvider, model = _model, items = output.Clone() }) : null;
+            var result = new LlmResponse { Content = text.Length > 0 ? text.ToString() : null, ToolCalls = calls, FinishReason = reason, Usage = usage, Continuation = continuation };
             result.Validate();
             return result;
         }

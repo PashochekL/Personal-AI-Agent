@@ -33,6 +33,11 @@ Reject<Message>("""{"role":"user","content":"x","tool_calls":[{"id":"1","name":"
 Reject<Message>("""{"role":"assistant"}""");
 var message = ContractJson.Deserialize<Message>("""{"role":"assistant","tool_calls":[{"id":"1","name":"read","arguments":{"path":"file"}}]}""");
 Check(ContractJson.Deserialize<Message>(ContractJson.Serialize(message)).ToolCalls[0].Arguments["path"].GetString() == "file");
+Check(message.Continuation is null && !ContractJson.Serialize(message).Contains("continuation"));
+var continued = ContractJson.Deserialize<Message>("""{"role":"assistant","content":"ok","continuation":{"provider":"test","items":[]}}""");
+Check(ContractJson.Deserialize<Message>(ContractJson.Serialize(continued)).Continuation?.GetProperty("provider").GetString() == "test");
+Reject<Message>("""{"role":"user","content":"x","continuation":{}}""");
+Reject<LlmResponse>("""{"continuation":"invalid"}""");
 Reject<Message>("""{"role":"assistant","tool_calls":[{"id":"1","name":"read","arguments":{},"extra":1}]}""");
 Check(ContractJson.Deserialize<TokenUsage>("""{"input_tokens":0}""").TotalTokens is null);
 foreach (var invalid in new[] { "-1", "1.5", "true", "\"1\"" }) Reject<TokenUsage>($$"""{"input_tokens":{{invalid}}}""");

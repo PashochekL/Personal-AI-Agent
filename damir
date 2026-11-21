@@ -1,6 +1,16 @@
 #!/bin/sh
 set -eu
-project_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+invocation_dir=$(pwd -P)
+script_path=$0
+link_depth=0
+while [ -L "$script_path" ]; do
+  link_depth=$((link_depth + 1))
+  if [ "$link_depth" -gt 32 ]; then printf '%s\n' 'Слишком много ссылок при поиске Дамира.' >&2; exit 1; fi
+  script_dir=$(CDPATH= cd -- "$(dirname -- "$script_path")" && pwd -P)
+  link_target=$(readlink "$script_path")
+  case "$link_target" in /*) script_path=$link_target ;; *) script_path=$script_dir/$link_target ;; esac
+done
+project_dir=$(CDPATH= cd -- "$(dirname -- "$script_path")" && pwd -P)
 cd "$project_dir"
 if [ -z "${DAMIR_TIMEZONE:-}" ]; then
   local_zone=$(readlink /etc/localtime 2>/dev/null || true)
@@ -28,15 +38,41 @@ fi
 DAMIR_POSTGRES_PASSWORD=$(cat "$db_key_file")
 export DAMIR_POSTGRES_PASSWORD
 
-case "${1:-auth-check}" in
+case "${1:-run}" in
   auth-check|login)
     printf '%s\n' 'Вход в ChatGPT по коду устройства через LiteLLM.'
     docker compose run --rm --no-deps --user 0 --entrypoint python gateway -c 'import os; os.chown("/tokens/chatgpt", 65532, 65532); os.chmod("/tokens/chatgpt", 0o700)'
     exec docker compose run --rm --no-deps --entrypoint python gateway -u -c 'from litellm.llms.chatgpt.authenticator import Authenticator; Authenticator().get_access_token(); print("Вход завершён. Сессия сохранена в отдельном томе Дамира.")'
     ;;
   run)
-    docker compose up -d gateway
-    exec docker compose run --rm --build agent
+    COMPOSE_PROGRESS=quiet
+    COMPOSE_IGNORE_ORPHANS=true
+    export COMPOSE_PROGRESS COMPOSE_IGNORE_ORPHANS
+    if [ "$invocation_dir" = "$project_dir" ]; then
+      DAMIR_WORKSPACE="$project_dir/workspace"
+      mkdir -p "$DAMIR_WORKSPACE"
+      DAMIR_SESSION_ID=${DAMIR_SESSION_ID:-local}
+    else
+      DAMIR_WORKSPACE="$invocation_dir"
+      workspace_hash=$(printf '%s' "$DAMIR_WORKSPACE" | openssl dgst -sha256 | awk '{print $NF}')
+      DAMIR_SESSION_ID=${DAMIR_SESSION_ID:-"workspace-$workspace_hash"}
+    fi
+    export DAMIR_WORKSPACE DAMIR_SESSION_ID
+    DAMIR_SANDBOX_VOLUME="damir-ipc-$(openssl rand -hex 16)"
+    export DAMIR_SANDBOX_VOLUME
+    sandbox_id=
+    cleanup() {
+      if [ -n "$sandbox_id" ]; then docker stop "$sandbox_id" >/dev/null 2>&1 || true; fi
+      docker volume rm "$DAMIR_SANDBOX_VOLUME" >/dev/null 2>&1 || true
+    }
+    trap cleanup EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    docker compose up -d --wait gateway postgres
+    docker compose build shell-sandbox
+    sandbox_id=$(docker compose run -d --rm --no-deps shell-sandbox)
+    if docker compose run --no-deps --rm --build agent; then result=0; else result=$?; fi
+    exit "$result"
     ;;
   *)
     printf '%s\n' 'Использование: damir [login|auth-check|run]' >&2

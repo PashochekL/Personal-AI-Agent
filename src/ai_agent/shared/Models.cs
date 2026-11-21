@@ -39,6 +39,8 @@ public sealed class Message : ExchangeModel
     public string? Content { get; init; }
     public List<ToolCall> ToolCalls { get; init; } = [];
     public string? ToolCallId { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public JsonElement? Continuation { get; init; }
     public override void Validate()
     {
         Require(Role is "system" or "user" or "assistant" or "tool", "Invalid message role");
@@ -46,6 +48,7 @@ public sealed class Message : ExchangeModel
         Require(ToolCallId is null || NonBlank(ToolCallId), "Invalid tool_call_id");
         Require(Role != "tool" || ToolCallId is not null, "Tool messages require tool_call_id");
         Require(ToolCalls!.Count == 0 || Role == "assistant", "Only assistant messages may contain tool calls");
+        Require(Continuation is null || (Role == "assistant" && Continuation.Value.ValueKind == JsonValueKind.Object), "Invalid continuation");
         Require(Content is not null || (Role == "assistant" && ToolCalls.Count > 0), "Message content is required");
         foreach (var call in ToolCalls) { Require(call is not null, "Invalid tool call"); call!.Validate(); }
     }
@@ -73,10 +76,13 @@ public sealed class LlmResponse : ExchangeModel
     public List<ToolCall> ToolCalls { get; init; } = [];
     public string? FinishReason { get; init; }
     public TokenUsage? Usage { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public JsonElement? Continuation { get; init; }
     public override void Validate()
     {
         Require(FinishReason is null or "stop" or "tool_calls" or "length" or "error" or "unknown", "Invalid finish reason");
         Require(ToolCalls is not null, "Tool calls are required");
+        Require(Continuation is null || Continuation.Value.ValueKind == JsonValueKind.Object, "Invalid continuation");
         foreach (var call in ToolCalls!) { Require(call is not null, "Invalid tool call"); call!.Validate(); }
         Usage?.Validate();
     }

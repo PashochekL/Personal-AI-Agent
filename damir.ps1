@@ -1,12 +1,13 @@
 #requires -Version 7.0
 param(
     [ValidateSet('auth-check', 'login', 'run')]
-    [string] $Command = 'auth-check'
+    [string] $Command = 'run'
 )
 
 $ErrorActionPreference = 'Stop'
 $projectDir = $PSScriptRoot
-$changedEnvironment = @('DAMIR_TIMEZONE', 'DAMIR_GATEWAY_CONFIG_REV', 'LITELLM_MASTER_KEY', 'DAMIR_POSTGRES_PASSWORD')
+$invocationDir = (Get-Location).ProviderPath
+$changedEnvironment = @('DAMIR_TIMEZONE', 'DAMIR_GATEWAY_CONFIG_REV', 'LITELLM_MASTER_KEY', 'DAMIR_POSTGRES_PASSWORD', 'DAMIR_WORKSPACE', 'DAMIR_SESSION_ID', 'DAMIR_SANDBOX_VOLUME', 'COMPOSE_PROGRESS', 'COMPOSE_IGNORE_ORPHANS')
 $previousEnvironment = @{}
 foreach ($name in $changedEnvironment) {
     $previousEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
@@ -66,11 +67,35 @@ try {
             exit $LASTEXITCODE
         }
         'run' {
-            [IO.Directory]::CreateDirectory((Join-Path $projectDir 'workspace')) | Out-Null
-            & docker compose up -d gateway
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            & docker compose run --rm --build agent
-            exit $LASTEXITCODE
+            $env:COMPOSE_PROGRESS = 'quiet'
+            $env:COMPOSE_IGNORE_ORPHANS = 'true'
+            if ([string]::Equals($invocationDir.TrimEnd([IO.Path]::DirectorySeparatorChar), $projectDir.TrimEnd([IO.Path]::DirectorySeparatorChar), [StringComparison]::OrdinalIgnoreCase)) {
+                $env:DAMIR_WORKSPACE = Join-Path $projectDir 'workspace'
+                [IO.Directory]::CreateDirectory($env:DAMIR_WORKSPACE) | Out-Null
+                if ([string]::IsNullOrWhiteSpace($env:DAMIR_SESSION_ID)) { $env:DAMIR_SESSION_ID = 'local' }
+            } else {
+                $env:DAMIR_WORKSPACE = $invocationDir
+                if ([string]::IsNullOrWhiteSpace($env:DAMIR_SESSION_ID)) {
+                    $hash = [Security.Cryptography.SHA256]::Create()
+                    try { $bytes = $hash.ComputeHash([Text.Encoding]::UTF8.GetBytes($invocationDir)) } finally { $hash.Dispose() }
+                    $env:DAMIR_SESSION_ID = 'workspace-' + [BitConverter]::ToString($bytes).Replace('-', '').ToLowerInvariant()
+                }
+            }
+            $env:DAMIR_SANDBOX_VOLUME = 'damir-ipc-' + [Guid]::NewGuid().ToString('N')
+            $sandboxId = $null
+            try {
+                & docker compose up -d --wait gateway postgres
+                if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                & docker compose build shell-sandbox
+                if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                $sandboxId = (& docker compose run -d --rm --no-deps shell-sandbox | Select-Object -Last 1)
+                if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($sandboxId)) { throw 'Не удалось запустить песочницу.' }
+                & docker compose run --no-deps --rm --build agent
+                exit $LASTEXITCODE
+            } finally {
+                if ($sandboxId) { & docker stop $sandboxId 2>$null | Out-Null }
+                & docker volume rm $env:DAMIR_SANDBOX_VOLUME 2>$null | Out-Null
+            }
         }
     }
 } finally {

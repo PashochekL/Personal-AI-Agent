@@ -5,7 +5,9 @@ services:
       dockerfile: docker/Dockerfile.shell-sandbox
     network_mode: none
     volumes:
-      - ./workspace:/workspace
+      - type: bind
+        source: ${DAMIR_WORKSPACE:-./workspace}
+        target: /workspace
       - sandbox_ipc:/ipc
     read_only: true
     tmpfs:
@@ -60,7 +62,9 @@ services:
       DAMIR_SESSION_ID: ${DAMIR_SESSION_ID:-local}
       DAMIR_POSTGRES_PASSWORD: ${DAMIR_POSTGRES_PASSWORD:?Use ./damir to set a database password}
     volumes:
-      - ./workspace:/workspace
+      - type: bind
+        source: ${DAMIR_WORKSPACE:-./workspace}
+        target: /workspace
       - sandbox_ipc:/sandbox-ipc
     working_dir: /workspace
     read_only: true
@@ -88,4 +92,5 @@ networks:
 volumes:
   damir_auth: {}
   damir_postgres: {}
-  sandbox_ipc: {}
+  sandbox_ipc:
+    name: ${DAMIR_SANDBOX_VOLUME:-personal-ai-agent_sandbox_ipc}

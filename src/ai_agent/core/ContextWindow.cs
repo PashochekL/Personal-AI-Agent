@@ -79,7 +79,7 @@ public sealed class ContextWindow
             else if (allowPartialSummary && summary.Length > 0) break;
             if (chunk.Count == 0)
             {
-                var serialized = JsonSerializer.Serialize(turns[index++]);
+                var serialized = JsonSerializer.Serialize(turns[index++].Select(WithoutContinuation));
                 for (var offset = 0; offset < serialized.Length;)
                 {
                     var low = 1;
@@ -134,8 +134,16 @@ public sealed class ContextWindow
     private static Message[] SummaryRequest(string summary, IReadOnlyList<Message> chunk) =>
     [
         new Message { Role = "system", Content = SummaryInstruction },
-        new Message { Role = "user", Content = "Previous summary:\n" + summary + "\nConversation data (JSON):\n" + JsonSerializer.Serialize(chunk) }
+        new Message { Role = "user", Content = "Previous summary:\n" + summary + "\nConversation data (JSON):\n" + JsonSerializer.Serialize(chunk.Select(WithoutContinuation)) }
     ];
+
+    private static Message WithoutContinuation(Message message) => new()
+    {
+        Role = message.Role,
+        Content = message.Content,
+        ToolCalls = message.ToolCalls,
+        ToolCallId = message.ToolCallId
+    };
 
     private static Message[] FragmentRequest(string summary, string fragment) =>
     [

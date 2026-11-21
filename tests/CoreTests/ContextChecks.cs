@@ -108,6 +108,10 @@ static class ContextChecks
         var summaryCalls = longModel.Requests.Count;
         var again = await longWindow.PrepareAsync(longModel, longHistory, shortCurrent, null, [], sessionId: "long");
         Check(summaryCalls > 1 && longModel.Requests.Count == summaryCalls && ReferenceEquals(longResult[0], system) && ReferenceEquals(again[^1], shortCurrent), "long multi-turn history is chunked and cached");
+        var opaqueHistory = new Message { Role = "assistant", Content = new string('x', 3000), Continuation = JsonSerializer.SerializeToElement(new { encrypted_content = "opaque-sentinel" }) };
+        var safeSummaryModel = new Model(new LlmResponse { Content = "summary" });
+        _ = await new ContextWindow(12000).PrepareAsync(safeSummaryModel, [opaqueHistory, shortCurrent], shortCurrent, null, [], force: true);
+        Check(!safeSummaryModel.Requests[0][1].Content!.Contains("opaque-sentinel"), "opaque continuation excluded from summarization prompt");
         var small = new Message { Role = "user", Content = "hello" };
         var emptyModel = new Model();
         var untouched = await window.PrepareAsync(emptyModel, [small], small, null, []);
