@@ -141,12 +141,14 @@ public sealed class Agent : IAgent
             var user = new Message { Role = "user", Content = userMessage };
             messages.Add(user);
             var userSaved = false;
+            // Keep the prefix stable during a tool cycle so Responses reasoning
+            // from a previous step can be replayed with the same instructions.
+            var dynamicContext = _systemContext?.Invoke();
             for (var i = 0; i < _maxIterations; i++)
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 var request = messages.ToList();
                 if (projectContext is not null) request.Insert(request.Count - 1 < 0 ? 0 : messages.FindIndex(m => ReferenceEquals(m, user)), projectContext);
-                var dynamicContext = _systemContext?.Invoke();
                 var systemText = string.Join("\n\n", new[] { _systemPrompt, dynamicContext }.Where(text => !string.IsNullOrWhiteSpace(text)));
                 if (systemText.Length > 0) request.Insert(0, new Message { Role = "system", Content = systemText });
                 var definitions = _tools.Definitions();
@@ -164,7 +166,7 @@ public sealed class Agent : IAgent
                 {
                     foreach (var call in response.ToolCalls)
                         if (!seen.Add(call.Id)) return Fail("Duplicate tool call ID");
-                    var assistant = new Message { Role = "assistant", Content = response.Content, ToolCalls = response.ToolCalls };
+                    var assistant = new Message { Role = "assistant", Content = response.Content, ToolCalls = response.ToolCalls, Continuation = response.Continuation?.Clone() };
                     await _store.AppendMessageAsync(sessionId, assistant, cancellationToken);
                     messages.Add(assistant);
                     var newlyPresented = new HashSet<string>(StringComparer.Ordinal);
@@ -199,7 +201,7 @@ public sealed class Agent : IAgent
                     continue;
                 }
                 if (response.FinishReason == "tool_calls" || string.IsNullOrWhiteSpace(response.Content)) return Fail("LLM returned no final answer");
-                var final = new Message { Role = "assistant", Content = response.Content };
+                var final = new Message { Role = "assistant", Content = response.Content, Continuation = response.Continuation?.Clone() };
                 await _store.AppendMessageAsync(sessionId, final, cancellationToken);
                 return new AgentResult { SessionId = sessionId, Status = TaskStatus.COMPLETED, Response = response.Content };
             }

@@ -10,12 +10,14 @@ ToolCall Call(string id, string name = "echo", string arguments = "{\"text\":\"h
 ToolRegistry Registry() { var registry = new ToolRegistry(); registry.Register(new Echo()); return registry; }
 
 var store = new Store();
-var model = new Model(new LlmResponse { ToolCalls = [Call("1"), Call("2", arguments: "{\"text\":\"bye\"}")] }, new LlmResponse { Content = "done" });
+var continuation = JsonSerializer.SerializeToElement(new { provider = "test", items = new[] { "opaque" } });
+var model = new Model(new LlmResponse { ToolCalls = [Call("1"), Call("2", arguments: "{\"text\":\"bye\"}")], Continuation = continuation }, new LlmResponse { Content = "done" });
 var result = await new Agent(model, store, Registry()).RunAsync("s", "hello");
 Check(result.Status == Status.COMPLETED && result.Response == "done", "tool cycle result");
 Check(store.Messages.Select(m => m.Role).SequenceEqual(["user", "assistant", "tool", "tool", "assistant"]), "history order");
 Check(store.Messages[2].ToolCallId == "1" && store.Messages[3].Content == "bye", "tool correlation");
 Check(model.Requests[1].Count == 4, "tool results returned to model");
+Check(store.Messages[1].Continuation?.GetProperty("provider").GetString() == "test" && model.Requests[1][1].Continuation is not null, "continuation saved and sent after tool calls");
 
 var usageTotals = new UsageTotals();
 var usageModel = new UsageTrackingClient(new Model(
@@ -49,6 +51,10 @@ fakeClock.Now = fakeClock.Now.AddSeconds(2);
 await timedAgent.RunAsync("s", "second");
 Check(model.Requests[0][0].Content!.Contains("2026-11-20 23:59:59 +07:00") && model.Requests[1][0].Content!.Contains("2026-11-21 00:00:01 +07:00"), "time updates across requests and uses configured time zone");
 Check(model.Requests[1][0].Content!.Contains("Test/Tomsk") && store.Messages.All(m => m.Role != "system"), "time context reports zone and stays out of history");
+var contextCalls = 0;
+var stableModel = new Model(new LlmResponse { ToolCalls = [Call("stable")] }, new LlmResponse { Content = "done" });
+await new Agent(stableModel, new Store(), Registry(), systemContext: () => $"clock {++contextCalls}").RunAsync("s", "test");
+Check(contextCalls == 1 && stableModel.Requests[0][0].Content == stableModel.Requests[1][0].Content, "dynamic system context stays stable across tool cycle");
 
 store = new Store();
 model = new Model(new LlmResponse { ToolCalls = [Call("1", "missing"), Call("2", arguments: "{\"text\":1}")] }, new LlmResponse { Content = "failed" });

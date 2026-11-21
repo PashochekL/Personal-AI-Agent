@@ -1,0 +1,20 @@
+#!/bin/sh
+set -eu
+project_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+install_dir=${DAMIR_INSTALL_DIR:-"$HOME/.local/bin"}
+mkdir -p "$install_dir"
+install_dir=$(CDPATH= cd -- "$install_dir" && pwd -P)
+target="$install_dir/damir"
+if [ -L "$target" ] && [ "$(readlink "$target")" = "$project_dir/damir" ]; then
+  printf '%s\n' 'Команда damir уже установлена.'
+elif [ -e "$target" ] || [ -L "$target" ]; then
+  printf '%s\n' "Не удалось установить: $target уже существует." >&2
+  exit 1
+else
+  ln -s "$project_dir/damir" "$target"
+  printf '%s\n' "Команда damir установлена: $target"
+fi
+case ":$PATH:" in
+  *":$install_dir:"*) printf '%s\n' 'Открой папку проекта и запусти damir.' ;;
+  *) printf '%s\n' "Добавь каталог $install_dir в PATH, затем открой новый терминал." ;;
+esac
