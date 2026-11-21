@@ -51,6 +51,25 @@ public sealed class TaskRequest
 {
     public required string SessionId { get; init; }
     public required string UserMessage { get; init; }
+    public string? Model { get; init; }
+    public string? Skill { get; init; }
+    public string Operation { get; init; } = "chat";
+
+    [System.Text.Json.Serialization.JsonIgnore]
+    public TaskSelection Selection => new(Model, Skill, Operation);
+}
+
+// HTTP and persistence details belong to Interfaces; shared exchange models stay unchanged.
+public sealed record TaskSelection(string? Model = null, string? Skill = null, string Operation = "chat")
+{
+    public void Validate()
+    {
+        if (Operation is not ("chat" or "compress" or "context") ||
+            Model is not null && (string.IsNullOrWhiteSpace(Model) || Model.Length > 256 || Model.Any(char.IsControl)) ||
+            Skill is not null && (Skill.Length is < 1 or > 128 || Skill.Any(c => !(c is >= 'a' and <= 'z' or >= '0' and <= '9' or '-'))) ||
+            Operation != "chat" && Skill is not null)
+            throw new TaskAdmissionException(400, "Invalid model, skill or operation.");
+    }
 }
 
 public sealed class TaskAdmissionException(int statusCode, string message) : Exception(message)

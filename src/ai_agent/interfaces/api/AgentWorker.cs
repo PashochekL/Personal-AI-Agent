@@ -8,6 +8,12 @@ namespace AiAgent.Api;
 public interface IBackendAgentFactory
 {
     Task<IAgent> CreateAsync(CancellationToken cancellationToken);
+    async Task<AgentResult> ExecuteAsync(AgentTask task, TaskSelection selection, CancellationToken ct)
+    {
+        if (selection != new TaskSelection()) throw new TaskAdmissionException(400, "Console operations are unavailable.");
+        var agent = await CreateAsync(ct);
+        return await agent.RunAsync(task.SessionId, task.UserMessage, ct);
+    }
 }
 
 /// <summary>Task orchestration only. All agent reasoning and tool execution stay in Core.</summary>
@@ -113,8 +119,8 @@ public sealed class AgentWorker(PostgresTaskStore store, RedisTaskQueue queue, I
         AgentResult result;
         try
         {
-            var agent = await agents.CreateAsync(run.Token);
-            result = await agent.RunAsync(task.SessionId, task.UserMessage, run.Token);
+            var selection = await store.SelectionAsync(task.TaskId, run.Token);
+            result = await agents.ExecuteAsync(task, selection, run.Token);
             result.Validate();
             if (result.SessionId != task.SessionId) throw new InvalidOperationException("Mismatched session");
             if (run.IsCancellationRequested) result = new AgentResult { SessionId = task.SessionId, Status = TaskStatus.CANCELLED, Response = result.Response };

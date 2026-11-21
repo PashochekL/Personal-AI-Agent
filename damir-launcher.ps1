@@ -7,7 +7,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $projectDir = $PSScriptRoot
 $invocationDir = (Get-Location).ProviderPath
-$changedEnvironment = @('DAMIR_BACKEND_API_KEY', 'DAMIR_TIMEZONE', 'DAMIR_GATEWAY_CONFIG_REV', 'LITELLM_MASTER_KEY', 'DAMIR_POSTGRES_PASSWORD', 'DAMIR_WORKSPACE', 'DAMIR_SESSION_ID', 'DAMIR_MEMORY_PROJECT', 'DAMIR_SANDBOX_VOLUME', 'DAMIR_MCP_VOLUME', 'DAMIR_GITHUB_MCP', 'DAMIR_GITHUB_TOKEN', 'GCM_CREDENTIAL_STORE', 'GCM_INTERACTIVE', 'COMPOSE_PROGRESS', 'COMPOSE_IGNORE_ORPHANS')
+$changedEnvironment = @('DAMIR_CLI_BACKEND_URL', 'DAMIR_BACKEND_API_KEY', 'DAMIR_TIMEZONE', 'DAMIR_GATEWAY_CONFIG_REV', 'LITELLM_MASTER_KEY', 'DAMIR_POSTGRES_PASSWORD', 'DAMIR_WORKSPACE', 'DAMIR_SESSION_ID', 'DAMIR_MEMORY_PROJECT', 'DAMIR_SANDBOX_VOLUME', 'DAMIR_MCP_VOLUME', 'DAMIR_GITHUB_MCP', 'DAMIR_GITHUB_TOKEN', 'GCM_CREDENTIAL_STORE', 'GCM_INTERACTIVE', 'COMPOSE_PROGRESS', 'COMPOSE_IGNORE_ORPHANS')
 $previousEnvironment = @{}
 foreach ($name in $changedEnvironment) {
     $previousEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
@@ -91,7 +91,7 @@ try {
                 $env:DAMIR_MEMORY_PROJECT = 'workspace-' + [BitConverter]::ToString($memoryBytes).Replace('-', '').ToLowerInvariant()
             }
             $env:DAMIR_MCP_VOLUME = 'damir-mcp-' + [Guid]::NewGuid().ToString('N')
-            if ($Command -eq 'run' -and [string]::IsNullOrWhiteSpace($env:DAMIR_GITHUB_TOKEN)) {
+            if ([string]::IsNullOrWhiteSpace($env:DAMIR_GITHUB_TOKEN)) {
                 try {
                     $saved = $githubKey | & git credential-manager get 2>$null
                     if ($LASTEXITCODE -eq 0) {
@@ -101,23 +101,19 @@ try {
                 } catch { }
             }
             $env:DAMIR_GITHUB_MCP = if ([string]::IsNullOrWhiteSpace($env:DAMIR_GITHUB_TOKEN)) { '0' } else { '1' }
-            if ($Command -eq 'backend') {
-                $env:DAMIR_GITHUB_MCP = '0'
-                if ([string]::IsNullOrWhiteSpace($env:DAMIR_BACKEND_API_KEY)) {
-                    $env:DAMIR_BACKEND_API_KEY = Get-DamirSecret (Join-Path $stateDir 'damir-backend-key') ''
-                }
+            if ([string]::IsNullOrWhiteSpace($env:DAMIR_BACKEND_API_KEY)) {
+                $env:DAMIR_BACKEND_API_KEY = Get-DamirSecret (Join-Path $stateDir 'damir-backend-key') ''
             }
             $sandboxId = $null
             $githubId = $null
+            $backendId = $null
             try {
                 & docker compose build web-search
                 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
                 & docker compose up -d --wait gateway postgres web-search
                 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-                if ($Command -eq 'backend') {
-                    & docker compose up -d --wait redis
-                    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-                }
+                & docker compose up -d --wait redis
+                if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
                 if ($env:DAMIR_MEMORY_ENABLED -ne '0') {
                     & docker compose up -d --wait memory-db embeddings
                     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -143,8 +139,15 @@ try {
                     exit $LASTEXITCODE
                 }
                 while ($true) {
-                    & docker compose run --no-deps --rm --build agent
+                    $backendName = 'damir-backend-' + $env:DAMIR_SANDBOX_VOLUME.Substring('damir-ipc-'.Length)
+                    $backendId = (& docker compose run -d --rm --no-deps --build --name $backendName backend | Select-Object -Last 1)
+                    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($backendId)) { throw 'Не удалось запустить backend.' }
+                    $env:DAMIR_CLI_BACKEND_URL = "http://${backendName}:8080"
+                    & docker compose run --no-deps --rm --build cli
                     $agentExit = $LASTEXITCODE
+                    & docker stop --time 40 $backendId 2>$null | Out-Null
+                    if ($LASTEXITCODE -ne 0) { throw 'Не удалось остановить backend.' }
+                    $backendId = $null
                     if ($agentExit -eq 71) {
                         $secret = Read-Host 'Вставь personal access token GitHub (ввод скрыт)' -AsSecureString
                         $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secret)
@@ -187,6 +190,7 @@ try {
                     exit $agentExit
                 }
             } finally {
+                if ($backendId) { & docker stop --time 40 $backendId 2>$null | Out-Null }
                 if ($sandboxId) { & docker stop $sandboxId 2>$null | Out-Null }
                 if ($githubId) { & docker stop $githubId 2>$null | Out-Null }
                 & docker volume rm $env:DAMIR_SANDBOX_VOLUME 2>$null | Out-Null

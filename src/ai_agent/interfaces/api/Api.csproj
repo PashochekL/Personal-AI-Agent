@@ -6,6 +6,7 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../../../../examples/SandboxConsole/ModelContextPolicy.cs" Link="ModelContextPolicy.cs" />
     <ProjectReference Include="../../core/Core.csproj" />
     <ProjectReference Include="../../gateway/Gateway.csproj" />
     <ProjectReference Include="../../memory/Memory.csproj" />

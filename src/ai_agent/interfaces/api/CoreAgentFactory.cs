@@ -10,7 +10,7 @@ using Npgsql;
 
 namespace AiAgent.Api;
 
-public sealed class CoreAgentFactory : IBackendAgentFactory, IDisposable
+public sealed partial class CoreAgentFactory : IBackendAgentFactory, IAsyncDisposable
 {
     private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(120) };
     private readonly PostgresContextStore _history;
@@ -22,17 +22,25 @@ public sealed class CoreAgentFactory : IBackendAgentFactory, IDisposable
     private readonly PostgresLongTermMemory? _memory;
     private readonly string _personality;
     private readonly TimeZoneInfo _timeZone;
-    private readonly int _budget;
+    private readonly int? _budget;
+    private readonly string _defaultModel;
+    private readonly Uri _gateway;
+    private readonly string _key;
+    private readonly ConsoleUsageStore _usage;
+    private McpTools? _github;
 
-    public CoreAgentFactory(PostgresContextStore history, BackendOptions options)
+    public CoreAgentFactory(PostgresContextStore history, BackendOptions options, NpgsqlDataSource database)
     {
         _history = history; _options = options;
         _workspace = new Workspace(Environment.GetEnvironmentVariable("AGENT_WORKSPACE") ?? "/workspace");
         var key = Environment.GetEnvironmentVariable("LITELLM_API_KEY") ?? throw new ArgumentException("LITELLM_API_KEY required");
         var gateway = new Uri(Environment.GetEnvironmentVariable("LITELLM_BASE_URL") ?? "http://gateway:4000");
-        _llm = new LiteLlmClient(_http, gateway, key, Environment.GetEnvironmentVariable("DEFAULT_MODEL") ?? "gpt-6.1-sol");
-        _budget = int.Parse(Environment.GetEnvironmentVariable("DAMIR_CONTEXT_TOKENS") is { Length: > 0 } budget ? budget : "120000");
-        if (_budget < 4096) throw new ArgumentException("Context budget must be at least 4096");
+        _gateway = gateway; _key = key;
+        _defaultModel = Environment.GetEnvironmentVariable("DEFAULT_MODEL") ?? "gpt-6.1-sol";
+        _llm = new LiteLlmClient(_http, gateway, key, _defaultModel);
+        _usage = new ConsoleUsageStore(database);
+        _budget = Environment.GetEnvironmentVariable("DAMIR_CONTEXT_TOKENS") is { Length: > 0 } budget ? int.Parse(budget) : null;
+        if (_budget is < 4096) throw new ArgumentException("Context budget must be at least 4096");
         _personality = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "damir-persona.txt"));
         _timeZone = TimeZoneInfo.FindSystemTimeZoneById(Environment.GetEnvironmentVariable("DAMIR_TIMEZONE") ?? "UTC");
         _memoryOptions = MemoryOptions.FromEnvironment();
@@ -52,21 +60,19 @@ public sealed class CoreAgentFactory : IBackendAgentFactory, IDisposable
     public async Task InitializeAsync(CancellationToken cancellationToken)
     {
         if (_memory is not null) await _memory.InitializeAsync(cancellationToken);
+        await _usage.InitializeAsync(cancellationToken);
+        if (Environment.GetEnvironmentVariable("DAMIR_GITHUB_MCP") == "1") _github = await ConnectGithubAsync(cancellationToken);
     }
 
-    public Task<IAgent> CreateAsync(CancellationToken cancellationToken)
+    public async Task<IAgent> CreateAsync(CancellationToken cancellationToken) =>
+        (await BuildAgentAsync(null, new TaskSelection(), cancellationToken)).Agent;
+
+    public async ValueTask DisposeAsync()
     {
-        cancellationToken.ThrowIfCancellationRequested();
-        var tools = new ToolRegistry();
-        tools.RegisterRange([new ReadFileTool(_workspace), new WriteFileTool(_workspace), new EditFileTool(_workspace), new ListDirectoryTool(_workspace), new ShellTool(new UnixSandboxExecutor())]);
-        tools.Register(new WebSearchTool(_http, new Uri("http://web-search:8080")));
-        return Task.FromResult<IAgent>(new Agent(_llm, _history, tools, workspace: _workspace, systemPrompt: _personality,
-            systemContext: () => "Current time: " + TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, _timeZone).ToString("O") + " (" + _timeZone.Id + ")",
-            contextWindow: new ContextWindow(_budget, _llm.CountTokensAsync, new SummaryCache(_history)),
-            memory: _memory, memoryScope: _memory is null ? null : _options.Scope));
+        if (_github is not null) await _github.DisposeAsync();
+        _http.Dispose();
+        if (_memoryDatabase is not null) await _memoryDatabase.DisposeAsync();
     }
-
-    public void Dispose() { _http.Dispose(); _memoryDatabase?.Dispose(); }
 
     private sealed class SummaryCache(PostgresContextStore store) : IContextSummaryCache
     {

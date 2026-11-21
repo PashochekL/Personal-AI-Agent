@@ -37,6 +37,7 @@ services:
     environment:
       DAMIR_BACKEND_URL: http://0.0.0.0:8080
       DAMIR_BACKEND_API_KEY: ${DAMIR_BACKEND_API_KEY:-}
+      DAMIR_GITHUB_MCP: ${DAMIR_GITHUB_MCP:-0}
       DAMIR_BACKEND_WORKERS: ${DAMIR_BACKEND_WORKERS:-2}
       DAMIR_TASK_TIMEOUT_SECONDS: ${DAMIR_TASK_TIMEOUT_SECONDS:-300}
       REDIS_URL: redis:6379
@@ -58,6 +59,7 @@ services:
         source: ${DAMIR_WORKSPACE:-./workspace}
         target: /workspace
       - sandbox_ipc:/sandbox-ipc
+      - github_mcp_ipc:/github-ipc
     working_dir: /workspace
     read_only: true
     tmpfs: ["/tmp:rw,noexec,nosuid,size=64m"]
@@ -68,6 +70,25 @@ services:
     cpus: 1.0
     stop_grace_period: 40s
     networks: [agent_internal, backend_http, search_internal]
+  cli:
+    profiles: [backend]
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.cli
+    environment:
+      DAMIR_BACKEND_URL: ${DAMIR_CLI_BACKEND_URL:-http://backend:8080}
+      DAMIR_BACKEND_API_KEY: ${DAMIR_BACKEND_API_KEY:-}
+      DAMIR_SESSION_ID: ${DAMIR_SESSION_ID:-local}
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=16m"]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    mem_limit: 128m
+    cpus: 0.5
+    stdin_open: true
+    tty: true
+    networks: [agent_internal]
   memory-db:
     image: pgvector/pgvector:0.8.7-pg17-bookworm@sha256:b513c48566e4777cd3370451400000c78eda6a08131d68f4c31d4a76f27bd8fd
     environment:

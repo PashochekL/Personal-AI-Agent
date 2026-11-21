@@ -42,7 +42,7 @@ try {
 printf '%s\n' "$*" >> "$DAMIR_TEST_LOG"
 printf '%s|%s|%s\n' "${DAMIR_WORKSPACE:-}" "${DAMIR_SESSION_ID:-}" "${DAMIR_MEMORY_PROJECT:-}" >> "$DAMIR_TEST_WORKSPACE_LOG"
 if [ "${DAMIR_TEST_FAIL:-}" = 1 ]; then exit 23; fi
-case "$*" in *shell-sandbox*) printf '%s\n' 'test-sandbox-id';; esac
+case "$*" in *'run -d'*) printf '%s\n' 'test-sandbox-id';; esac
 exit 0
 '@
         [IO.File]::WriteAllText($fakeDocker, $mock + "`n", [Text.UTF8Encoding]::new($false))
@@ -55,7 +55,13 @@ exit 0
     $output = (& $pwsh -NoLogo -NoProfile -File $launcher run 2>&1 | Out-String)
     if ($LASTEXITCODE -ne 0) { throw "Команда run завершилась ошибкой: $output" }
     $calls = [IO.File]::ReadAllLines($env:DAMIR_TEST_LOG)
-    if ($calls.Count -ne 10 -or $calls[0] -notlike 'compose build web-search*' -or $calls[1] -notlike 'compose up -d --wait gateway postgres web-search*' -or $calls[2] -notlike 'compose up -d --wait memory-db embeddings*' -or $calls[3] -notlike 'compose exec -T embeddings ollama show*' -or $calls[4] -notlike 'compose build shell-sandbox*' -or $calls[5] -notlike '*shell-sandbox*' -or $calls[6] -notlike 'compose run --no-deps --rm --build agent*' -or $calls[7] -notlike 'stop test-sandbox-id*' -or $calls[8] -notlike 'volume rm damir-ipc-*' -or $calls[9] -notlike 'volume rm damir-mcp-*') { throw 'Неверная последовательность запуска.' }
+    $allCalls = $calls -join "`n"
+    $backendCall = $calls | Where-Object { $_ -like 'compose run -d --rm --no-deps --build --name * backend' } | Select-Object -First 1
+    $cliCall = 'compose run --no-deps --rm --build cli'
+    if (-not $backendCall -or -not $allCalls.Contains('compose up -d --wait redis') -or
+        $allCalls.IndexOf($backendCall) -gt $allCalls.IndexOf($cliCall) -or -not $allCalls.Contains($cliCall) -or
+        $allCalls.Contains('--build agent') -or -not $allCalls.Contains('stop --time 40 test-sandbox-id') -or
+        -not $allCalls.Contains('volume rm damir-ipc-') -or -not $allCalls.Contains('volume rm damir-mcp-')) { throw 'HTTP CLI не запущен с собственным backend и корректной очисткой.' }
     $key = [IO.File]::ReadAllText((Join-Path $fixtureDir '.uv-cache/damir-gateway-key')).Trim()
     $password = [IO.File]::ReadAllText((Join-Path $fixtureDir '.uv-cache/damir-db-password')).Trim()
     if ($key -notmatch '^sk-[0-9a-f]{64}$' -or $password -notmatch '^[0-9a-f]{64}$' -or $output.Contains($key) -or $output.Contains($password)) { throw 'Ошибка генерации или вывода локальных ключей.' }

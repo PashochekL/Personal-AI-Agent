@@ -116,6 +116,10 @@ try
         Scope = new MemoryScope { OwnerId = scope.OwnerId, ProjectId = "other-project" } };
     var foreign = new PostgresTaskStore(db, foreignOptions);
     Check(!await foreign.HasSessionAsync(session) && await foreign.GetAsync(first.TaskId) is null && await foreign.CancelAsync(first.TaskId) is null, "task and history scope isolation");
+    Check(await foreign.LatestAsync(session, default) is null, "latest task receipt respects project scope");
+    var ownNamed = await app.Services.GetRequiredService<PostgresTaskStore>().ResolveSessionAsync("same-name", default);
+    var foreignNamed = await foreign.ResolveSessionAsync("same-name", default);
+    Check(ownNamed.SessionId != foreignNamed.SessionId, "named conversations are isolated by owner/project");
     var store = app.Services.GetRequiredService<PostgresTaskStore>();
     await using (var duplicate = await store.TryWorkerLeaseAsync(default)) Check(duplicate is null, "second Worker excluded by PostgreSQL lease");
 

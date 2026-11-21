@@ -27,7 +27,8 @@ cat > "$test_dir/bin/docker" <<'MOCK'
 case "$*" in
   'compose run -d --rm --no-deps shell-sandbox') printf 'shell-id\n' ;;
   'compose run -d --rm --no-deps github-mcp') printf 'github-id\n'; printf 'github-started\n' >> "$TEST_STATE/events" ;;
-  'compose run --no-deps --rm --build agent')
+  *'--build --name '*' backend') printf 'backend-id\n' ;;
+  'compose run --no-deps --rm --build cli')
     printf 'agent:%s\n' "$DAMIR_GITHUB_MCP" >> "$TEST_STATE/events"
     code=$(head -n 1 "$TEST_STATE/codes")
     tail -n +2 "$TEST_STATE/codes" > "$TEST_STATE/codes.next"
@@ -50,7 +51,7 @@ printf '72\n0\n' > "$test_dir/codes"
 "$test_dir/project/damir" > "$test_dir/output"
 [ ! -f "$test_dir/credential" ]
 [ "$(cat "$test_dir/events")" = "$(printf 'github-started\nagent:1\nagent:0')" ]
-if rg -q 'test-token-not-real' "$test_dir/output"; then exit 1; fi
+if grep -q 'test-token-not-real' "$test_dir/output"; then exit 1; fi
  : > "$test_dir/events"
 printf '71\n0\n' > "$test_dir/codes"
 TEST_STORE_FAIL=1

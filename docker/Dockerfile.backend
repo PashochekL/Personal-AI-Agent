@@ -1,6 +1,7 @@
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /source
 COPY src/ src/
+COPY examples/SandboxConsole/ModelContextPolicy.cs examples/SandboxConsole/ModelContextPolicy.cs
 COPY config/damir-persona.txt config/damir-persona.txt
 RUN dotnet publish src/ai_agent/interfaces/api/Api.csproj -c Release -o /app --disable-build-servers
 
