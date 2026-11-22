@@ -5,11 +5,12 @@ using System.Text.Json;
 using AiAgent.Shared;
 using TaskStatus = AiAgent.Shared.TaskStatus;
 
-namespace AiAgent.Cli;
+namespace AiAgent.Http;
 
 public sealed record ConsoleCatalog(string DefaultModel, string[] Models, ConsoleSkill[] Skills, bool Github);
 public sealed record ConsoleSkill(string Name, string Description);
 public sealed record ConsoleUsage(long Total, int MissingUsageResponses);
+public sealed record BackendIdentity(string OwnerId, string ProjectId);
 public sealed record Submission(string SessionId, string UserMessage, string? Model = null, string? Skill = null,
     string Operation = "chat", string? RequestKey = null);
 public sealed class BackendException(string message, HttpStatusCode? status = null) : Exception(message)
@@ -70,6 +71,7 @@ public sealed class BackendClient
 
     private static T Read<T>(string json) => JsonSerializer.Deserialize<T>(json, Json) ?? throw new BackendException("Некорректный ответ backend.");
     public async Task ReadyAsync(CancellationToken ct) => _ = await SendAsync(HttpMethod.Get, "/health/ready", null, null, ct);
+    public async Task<BackendIdentity> IdentityAsync(CancellationToken ct) => Read<BackendIdentity>(await SendAsync(HttpMethod.Get, "/identity", null, null, ct));
     public async Task<ConsoleCatalog> CatalogAsync(CancellationToken ct) => Read<ConsoleCatalog>(await SendAsync(HttpMethod.Get, "/console", null, null, ct));
     public async Task<ConsoleUsage> UsageAsync(string session, CancellationToken ct) => Read<ConsoleUsage>(await SendAsync(HttpMethod.Get, $"/sessions/{Id(session)}/usage", null, null, ct));
     public async Task<Session> SessionAsync(string id, CancellationToken ct) => ContractJson.Deserialize<Session>(await SendAsync(HttpMethod.Get, "/sessions/" + Id(id), null, null, ct));

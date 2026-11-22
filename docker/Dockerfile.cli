@@ -1,6 +1,7 @@
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /source
 COPY src/ai_agent/shared/ src/ai_agent/shared/
+COPY src/ai_agent/interfaces/http/ src/ai_agent/interfaces/http/
 COPY src/ai_agent/interfaces/cli/ src/ai_agent/interfaces/cli/
 COPY examples/SandboxConsole/ConsoleInput.cs examples/SandboxConsole/ConsoleInput.cs
 COPY examples/SandboxConsole/StartupBanner.cs examples/SandboxConsole/StartupBanner.cs

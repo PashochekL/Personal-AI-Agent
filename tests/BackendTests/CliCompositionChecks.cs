@@ -3,7 +3,7 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using AiAgent.Api;
-using AiAgent.Cli;
+using AiAgent.Http;
 using AiAgent.Shared;
 using TaskStatus = AiAgent.Shared.TaskStatus;
 
@@ -63,7 +63,7 @@ internal static class CliCompositionChecks
 
     private static async Task<(int ExitCode, string Output)> RunCliAsync(Uri address, string key, string input)
     {
-        var dll = typeof(BackendClient).Assembly.Location;
+        var dll = Path.Combine(AppContext.BaseDirectory, "Cli.dll");
         var start = new ProcessStartInfo("dotnet") { UseShellExecute = false, RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true };
         start.ArgumentList.Add(dll);
         start.Environment["DAMIR_BACKEND_URL"] = address.ToString(); start.Environment["DAMIR_BACKEND_API_KEY"] = key;

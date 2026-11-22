@@ -73,6 +73,7 @@ public static class BackendApplication
         });
         static IResult Model<T>(T model, int code = 200) where T : ExchangeModel => Results.Content(ContractJson.Serialize(model), "application/json", statusCode: code);
         app.MapGet("/health/live", () => Results.Ok(new { status = "live" }));
+        app.MapGet("/identity", (BackendOptions configured) => Results.Json(new { owner_id = configured.Scope.OwnerId, project_id = configured.Scope.ProjectId }));
         app.MapGet("/health/ready", async (PostgresTaskStore store, RedisTaskQueue queue, AgentWorker worker, CancellationToken token) =>
         {
             await store.HasSessionAsync("health", token);

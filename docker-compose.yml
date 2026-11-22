@@ -89,6 +89,69 @@ services:
     stdin_open: true
     tty: true
     networks: [agent_internal]
+  telegram:
+    profiles: [telegram]
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.telegram
+    environment:
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_ALLOWED_USER_ID: ${TELEGRAM_ALLOWED_USER_ID:-}
+      TELEGRAM_ALLOWED_USER_IDS: ${TELEGRAM_ALLOWED_USER_IDS:-}
+      DAMIR_MEMORY_OWNER: ${DAMIR_MEMORY_OWNER:-local}
+      DAMIR_MEMORY_PROJECT: ${DAMIR_MEMORY_PROJECT:-}
+      DAMIR_SESSION_ID: ${DAMIR_SESSION_ID:-local}
+      DAMIR_TELEGRAM_STATE_DIR: /state
+      DAMIR_TELEGRAM_BACKENDS_FILE: /profiles/backends.json
+    volumes:
+      - damir_telegram_state:/state
+      - type: bind
+        source: ${DAMIR_TELEGRAM_BACKENDS_FILE:-./.uv-cache/telegram-backends-unconfigured.json}
+        target: /profiles/backends.json
+        read_only: true
+        bind:
+          create_host_path: false
+    networks: [agent_internal, telegram_egress]
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=16m"]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    mem_limit: 192m
+    cpus: 0.5
+    stop_grace_period: 20s
+    stdin_open: true
+    tty: true
+  telegram-backend:
+    extends:
+      service: backend
+    profiles: [telegram]
+    environment:
+      DAMIR_BACKEND_API_KEY: ${DAMIR_TELEGRAM_PROFILE_KEY:-}
+      DAMIR_MEMORY_OWNER: ${DAMIR_TELEGRAM_PROFILE_OWNER:-}
+      DAMIR_MEMORY_PROJECT: ${DAMIR_TELEGRAM_PROFILE_PROJECT:-}
+      DAMIR_GITHUB_MCP: "0"
+    ports: !reset []
+    volumes: !override
+      - telegram_workspace:/workspace
+      - telegram_ipc:/sandbox-ipc
+  telegram-shell:
+    extends:
+      service: shell-sandbox
+    profiles: [telegram]
+    volumes: !override
+      - telegram_workspace:/workspace
+      - telegram_ipc:/ipc
+  telegram-legacy:
+    extends:
+      service: telegram
+    profiles: [telegram]
+    command: [--drain-legacy]
+    environment:
+      DAMIR_BACKEND_URL: ${DAMIR_CLI_BACKEND_URL:-http://backend:8080}
+      DAMIR_BACKEND_API_KEY: ${DAMIR_BACKEND_API_KEY:-}
+    volumes: !override
+      - damir_telegram_state:/state
   memory-db:
     image: pgvector/pgvector:0.8.7-pg17-bookworm@sha256:b513c48566e4777cd3370451400000c78eda6a08131d68f4c31d4a76f27bd8fd
     environment:
@@ -234,6 +297,7 @@ services:
         condition: service_healthy
     networks: [agent_internal, search_internal]
 networks:
+  telegram_egress: {}
   backend_http: {}
   embedding_egress: {}
   agent_internal:
@@ -244,6 +308,11 @@ networks:
     internal: true
   search_egress: {}
 volumes:
+  telegram_workspace:
+    name: ${DAMIR_TELEGRAM_WORKSPACE_VOLUME:-damir-telegram-unconfigured-workspace}
+  telegram_ipc:
+    name: ${DAMIR_TELEGRAM_IPC_VOLUME:-damir-telegram-unconfigured-ipc}
+  damir_telegram_state: {}
   damir_memory: {}
   damir_embeddings: {}
   damir_auth: {}

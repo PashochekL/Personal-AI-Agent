@@ -57,6 +57,7 @@ static class CompositionChecks
         {
             Interlocked.Increment(ref modelCalls);
             using var json = await JsonDocument.ParseAsync(context.Request.Body);
+            if (IsolatedAccountsChecks.ModelReply(json.RootElement) is { } isolated) return Results.Json(isolated);
             var input = json.RootElement.GetProperty("input").GetRawText();
             if (input.Contains("The owner selected") && input.Contains("Synthetic skill instructions")) Interlocked.Exchange(ref selectedSkillSeen, 1);
             if (json.RootElement.GetProperty("model").GetString() == "synthetic-other") Interlocked.Exchange(ref selectedModelSeen, 1);
@@ -97,7 +98,7 @@ static class CompositionChecks
             try
             {
                 using var cliHttp = new HttpClient();
-                var cli = new AiAgent.Cli.BackendClient(cliHttp, http.BaseAddress!, options.ApiKey);
+                var cli = new AiAgent.Http.BackendClient(cliHttp, http.BaseAddress!, options.ApiKey);
                 var cliSession = await cli.ResolveSessionAsync("cli-synthetic", default);
                 var replay = await cli.SubmitAsync(new(cliSession.SessionId, "cli-selected-skill", "synthetic-other", "merged-skill", RequestKey: "cli-request"), default);
                 if (replay.Status != TaskStatus.COMPLETED) throw new Exception("Lost receipt was not recovered with unavailable skill");
@@ -107,13 +108,15 @@ static class CompositionChecks
             Interlocked.Exchange(ref catalogUnavailable, 1);
             try { await CliCompositionChecks.RunOfflineCatalogAsync(http, options.ApiKey); }
             finally { Interlocked.Exchange(ref catalogUnavailable, 0); }
+            var telegramCount = await TelegramCompositionChecks.RunAsync(http, options.ApiKey, options.Scope);
+            var isolationCount = await IsolatedAccountsChecks.RunAsync(options);
             await app.StopAsync();
             Console.WriteLine("PASS: production composition executes Core memory tool through gateway HTTP");
             Console.WriteLine("PASS: API session retrieves long-term memory saved in a different session");
             Console.WriteLine("PASS: production composition persists tool call IDs and results");
             Console.WriteLine("PASS: production composition advertises upstream web.search tool");
             Console.WriteLine("PASS: .agents instructions and skills coexist with long-term memory");
-            return 8 + cliCount;
+            return 8 + cliCount + telegramCount + isolationCount;
         }
         finally
         {

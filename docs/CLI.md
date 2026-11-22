@@ -84,7 +84,9 @@ Backend обслуживает один workspace; клиент не выбир�
 запущенный backend после изменения токена требуется перезапустить.
 
 `examples/SandboxConsole` и сервис Compose `agent` сохранены для прямых
-проверок Core. Обычный launcher их не вызывает. Telegram — следующий этап.
+проверок Core. Обычный launcher их не вызывает. Telegram использует те же
+маршруты в отдельных backend для каждого ID. Данные CLI и Telegram разделены;
+подробности в [TELEGRAM.md](TELEGRAM.md).
 
 ## Проверки
 

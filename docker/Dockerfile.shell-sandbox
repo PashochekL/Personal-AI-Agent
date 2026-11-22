@@ -6,6 +6,7 @@ RUN dotnet publish examples/ShellSandbox/ShellSandbox.csproj -c Release -o /app
 FROM mcr.microsoft.com/dotnet/runtime:10.0
 COPY --from=build /usr/share/powershell/ /usr/share/powershell/
 RUN mkdir /ipc && chown 65532:65532 /ipc && ln -s /usr/share/powershell/pwsh /usr/bin/pwsh
+RUN mkdir /workspace && chown 65532:65532 /workspace
 WORKDIR /app
 COPY --from=build /app/ ./
 USER 65532:65532

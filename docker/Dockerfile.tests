@@ -5,9 +5,13 @@ COPY examples/ examples/
 COPY tests/ tests/
 COPY config/ config/
 COPY damir ./damir
+COPY scripts/ scripts/
 RUN dotnet run --project tests/ContractTests/ContractTests.csproj
 RUN dotnet run --project tests/CoreTests/CoreTests.csproj
 RUN dotnet run --project tests/MemoryTests/MemoryTests.csproj
 RUN dotnet run --project tests/CliTests/CliTests.csproj
+RUN dotnet run --project tests/TelegramTests/TelegramTests.csproj
 RUN sh tests/LaunchTests/memory-workspace.sh
 RUN sh tests/LaunchTests/github-auth.sh
+RUN sh tests/LaunchTests/telegram.sh
+RUN sh tests/LaunchTests/telegram-settings.sh

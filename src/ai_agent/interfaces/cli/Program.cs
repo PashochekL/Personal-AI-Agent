@@ -1,4 +1,4 @@
-using AiAgent.Cli;
+using AiAgent.Http;
 using AiAgent.Shared;
 using System.Net;
 using System.Text.Json;
