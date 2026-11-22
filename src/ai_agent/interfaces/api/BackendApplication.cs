@@ -28,6 +28,7 @@ public static class BackendApplication
         // Do not log URLs, bodies, connection strings, authentication headers or provider exceptions.
         builder.Logging.AddFilter("Microsoft.AspNetCore", LogLevel.Warning);
         builder.Services.AddSingleton(options);
+        builder.Services.ConfigureHttpJsonOptions(json => json.SerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower);
         builder.Services.AddSingleton(_ => NpgsqlDataSource.Create(options.Database));
         builder.Services.AddSingleton<PostgresTaskStore>();
         builder.Services.AddSingleton<PostgresContextStore>();
@@ -116,6 +117,7 @@ public static class BackendApplication
             var request = await JsonSerializer.DeserializeAsync<TaskRequest>(context.Request.Body, Json, token)
                 ?? throw new TaskAdmissionException(400, "Request body required.");
             request.Selection.Validate();
+            if (request.Channel is not ("console" or "telegram")) throw new TaskAdmissionException(400, "Invalid input channel.");
             var requestKey = context.Request.Headers.TryGetValue("Idempotency-Key", out var key) ? key.ToString() : null;
             if (string.IsNullOrWhiteSpace(request.SessionId)) throw new TaskAdmissionException(400, "Session required.");
             // A lost receipt can be recovered even if Gateway or the selected skill is now unavailable.
@@ -130,6 +132,7 @@ public static class BackendApplication
             await store.GetAsync(id, token) is { } task ? Model(task) : Results.NotFound());
         app.MapPost("/tasks/{id}/cancel", async (string id, PostgresTaskStore store, CancellationToken token) =>
             await store.CancelAsync(id, token) is { } task ? Model(task, 202) : Results.NotFound());
+        app.MapTelegramCompanion();
         return app;
     }
 }

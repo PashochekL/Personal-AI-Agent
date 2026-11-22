@@ -61,7 +61,10 @@ damir_read_telegram_ids() {
   printf '%s\n' ids >> "$TEST_STATE/prompts"
   raw_ids=$TEST_INPUT_IDS
 }
-damir_configure_telegram "$@"
+case "${1:-}" in
+  personal-*) damir_personal_telegram "${1#personal-}" ;;
+  *) damir_configure_telegram "$@" ;;
+esac
 MOCK
 chmod +x "$fixture/bin/"*
 export PATH="$fixture/bin:$PATH" TEST_STATE="$fixture" DAMIR_TIMEZONE=UTC DAMIR_MEMORY_ENABLED=0
@@ -76,7 +79,7 @@ entry=$(find "$fixture/keychain" -type f)
 # A restart must read Keychain, reuse the IDs, and never ask for input or store again.
 TEST_ALLOW_INPUT=0 sh ./settings-check.sh telegram >> "$fixture/output" 2>&1
 [ "$(grep -c '^store:' "$fixture/keychain-calls")" = 1 ]
-if ! sh ./damir telegram </dev/null >> "$fixture/output" 2>&1; then cat "$fixture/output"; exit 1; fi
+if ! sh ./damir telegram-isolated </dev/null >> "$fixture/output" 2>&1; then cat "$fixture/output"; exit 1; fi
 grep -q -- '--name damir-tg-.*-900001 telegram-backend' "$fixture/docker-calls"
 grep -q -- '--name damir-tg-.*-900002 telegram-backend' "$fixture/docker-calls"
 # Explicit setup overrides environment credentials and can switch to another bot.
@@ -131,4 +134,19 @@ sh ./settings-check.sh telegram >> "$fixture/output" 2>&1
 cmp "$fixture/keychain-calls" "$fixture/previous-calls"
 if find .uv-cache -type f -exec grep -l 'synthetic_token_not_a_real_secret\|synthetic_environment_token_only' {} + | grep -q .; then exit 1; fi
 if grep -q 'synthetic_token_not_a_real_secret\|synthetic_environment_token_only' "$fixture/output" "$fixture/read-error" "$fixture/docker-calls" "$fixture/keychain-calls"; then exit 1; fi
+# Personal /tg reuses the legacy Keychain entry without reading any user IDs.
+export TEST_PLATFORM=Darwin
+TEST_ALLOW_INPUT=0 sh ./settings-check.sh personal-load >> "$fixture/output" 2>&1
+mkdir -p "$fixture/personal/scripts"
+cp ./scripts/telegram-settings.sh "$fixture/personal/scripts/telegram-settings.sh"
+cp ./settings-check.sh "$fixture/personal/settings-check.sh"
+cd "$fixture/personal"
+prompt_count=$(wc -l < "$fixture/prompts" | tr -d ' ')
+unset TELEGRAM_BOT_TOKEN
+sh ./settings-check.sh personal-setup >> "$fixture/output" 2>&1
+[ "$(wc -l < "$fixture/prompts" | tr -d ' ')" -eq "$((prompt_count + 1))" ]
+[ "$(tail -n 1 "$fixture/prompts")" = token ]
+TEST_ALLOW_INPUT=0 sh ./settings-check.sh personal-load >> "$fixture/output" 2>&1
+[ ! -d .uv-cache ]
+[ "$(find "$fixture/keychain" -type f | wc -l | tr -d ' ')" = 3 ]
 printf '%s\n' 'macOS Telegram settings checks passed (mock Keychain and Docker)'

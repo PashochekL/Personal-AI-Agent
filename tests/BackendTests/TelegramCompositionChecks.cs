@@ -64,6 +64,7 @@ internal static class TelegramCompositionChecks
             {
                 "getMe" => "{\"id\":123456,\"is_bot\":true,\"username\":\"synthetic_bot\"}",
                 "getWebhookInfo" => "{\"url\":\"\"}",
+                "setMyCommands" => "true",
                 "sendMessage" => "{\"message_id\":1}",
                 _ => throw new Exception("Unexpected Telegram method")
             };

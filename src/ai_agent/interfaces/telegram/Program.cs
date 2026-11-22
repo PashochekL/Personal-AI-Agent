@@ -28,7 +28,7 @@ try
         return 0;
     }
     var profilesPath = Environment.GetEnvironmentVariable("DAMIR_TELEGRAM_BACKENDS_FILE");
-    if (string.IsNullOrWhiteSpace(profilesPath)) throw new ArgumentException("Для изолированного Telegram нужен файл серверов аккаунтов. Запусти damir telegram.");
+    if (string.IsNullOrWhiteSpace(profilesPath)) throw new ArgumentException("Для изолированного Telegram нужен файл серверов аккаунтов. Запусти damir telegram-isolated.");
     using var router = new TelegramRouter(telegram, options, TelegramBackendProfile.Load(profilesPath, options), Console.Error);
     while (true)
     {

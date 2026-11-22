@@ -69,6 +69,7 @@ public sealed partial class CoreAgentFactory
         var tools = new ToolRegistry();
         tools.RegisterRange([new ReadFileTool(_workspace), new WriteFileTool(_workspace), new EditFileTool(_workspace), new ListDirectoryTool(_workspace), new ShellTool(new UnixSandboxExecutor())]);
         tools.Register(new WebSearchTool(_http, new Uri("http://web-search:8080")));
+        if (sessionId is not null) tools.Register(new TelegramFileTool(Environment.GetEnvironmentVariable("AGENT_WORKSPACE") ?? "/workspace", sessionId, _tasks));
         _github?.Register(tools);
         var totals = new UsageTotals();
         var tracked = new UsageTrackingClient(client, totals, sessionId is null ? null : (usage, token) => _usage.AddAsync(sessionId, usage, token));

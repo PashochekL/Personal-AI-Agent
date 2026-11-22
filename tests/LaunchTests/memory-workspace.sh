@@ -10,16 +10,19 @@ cp "$repo/config/litellm.yaml" "$fixture/damir/config/litellm.yaml"
 cat > "$fixture/bin/docker" <<'MOCK'
 #!/bin/sh
 printf '%s|%s|%s\n' "$DAMIR_WORKSPACE" "$DAMIR_SESSION_ID" "$DAMIR_MEMORY_PROJECT" >> "$MEMORY_WORKSPACE_LOG"
+printf '%s\n' "$DAMIR_WORKSPACE_LABEL" >> "$MEMORY_LABEL_LOG"
 printf '%s\n' "$*" >> "$MEMORY_CALL_LOG"
 case "$*" in *'run -d'*) printf '%s\n' test-container;; esac
 MOCK
 chmod +x "$fixture/bin/docker"
 export PATH="$fixture/bin:$PATH" DAMIR_TIMEZONE=UTC
 export MEMORY_WORKSPACE_LOG="$fixture/workspace.log" MEMORY_CALL_LOG="$fixture/calls.log"
+export MEMORY_LABEL_LOG="$fixture/label.log"
 unset DAMIR_GITHUB_TOKEN DAMIR_MEMORY_PROJECT DAMIR_SESSION_ID
 cd "$fixture/Project A"
 sh "$fixture/damir/damir" run
 first=$(head -n 1 "$MEMORY_WORKSPACE_LOG")
+[ "$(head -n 1 "$MEMORY_LABEL_LOG")" = 'Project A' ]
 first_project=${first##*|}
 grep -q 'compose up -d --wait memory-db embeddings' "$MEMORY_CALL_LOG"
 grep -q 'compose build web-search' "$MEMORY_CALL_LOG"
@@ -50,4 +53,15 @@ grep -q 'compose run --no-deps --rm --build --service-ports backend' "$MEMORY_CA
 backend_key=$(cat "$fixture/damir/.uv-cache/damir-backend-key")
 DAMIR_MEMORY_ENABLED=0 sh "$fixture/damir/damir" backend
 [ "$(cat "$fixture/damir/.uv-cache/damir-backend-key")" = "$backend_key" ]
+cd "$fixture/damir"
+: > "$MEMORY_WORKSPACE_LOG"
+DAMIR_MEMORY_ENABLED=0 sh ./damir run
+case "$(head -n 1 "$MEMORY_WORKSPACE_LOG")" in "$fixture/damir|workspace-"*) ;; *) exit 1;; esac
+# Broad filesystem roots must be rejected before any Docker invocation.
+: > "$MEMORY_CALL_LOG"
+if HOME="$fixture/damir" sh ./damir run >/dev/null 2>&1; then exit 1; fi
+[ ! -s "$MEMORY_CALL_LOG" ]
+cd /
+if sh "$fixture/damir/damir" run >/dev/null 2>&1; then exit 1; fi
+[ ! -s "$MEMORY_CALL_LOG" ]
 printf '%s\n' 'Unix memory workspace checks passed'

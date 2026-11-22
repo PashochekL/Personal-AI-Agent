@@ -1,4 +1,4 @@
-﻿#requires -Version 7.0
+#requires -Version 7.0
 $ErrorActionPreference = 'Stop'
 $repoDir = Split-Path -Parent $PSScriptRoot
 $fixtureDir = Join-Path ([IO.Path]::GetTempPath()) ('damir-launch-check-' + [Guid]::NewGuid().ToString('N'))
@@ -14,6 +14,7 @@ $oldGithubToken = $env:DAMIR_GITHUB_TOKEN
 $oldTelegramToken = $env:TELEGRAM_BOT_TOKEN
 $oldTelegramUser = $env:TELEGRAM_ALLOWED_USER_ID
 $oldTelegramUsers = $env:TELEGRAM_ALLOWED_USER_IDS
+$oldSettingsDir = $env:DAMIR_SETTINGS_DIR
 $pwsh = (Get-Command pwsh -CommandType Application).Source | Select-Object -First 1
 try {
     $fakeBin = Join-Path $fixtureDir 'bin'
@@ -34,9 +35,10 @@ try {
     $env:DAMIR_GITHUB_TOKEN = ''
     $env:TELEGRAM_ALLOWED_USER_IDS = ''
     $env:DAMIR_TIMEZONE = 'Asia/Tomsk'
+    $env:DAMIR_SETTINGS_DIR = Join-Path $fixtureDir 'settings'
     if ($IsWindows) {
         $fakeDocker = Join-Path $fakeBin 'docker.cmd'
-        [IO.File]::WriteAllText($fakeDocker, "@echo off`r`nchcp 65001 >nul`r`necho %*>>`"%DAMIR_TEST_LOG%`"`r`necho %DAMIR_WORKSPACE%^|%DAMIR_SESSION_ID%^|%DAMIR_MEMORY_PROJECT%>>`"%DAMIR_TEST_WORKSPACE_LOG%`"`r`nif `"%DAMIR_TEST_FAIL%`"==`"1`" exit /b 23`r`necho test-sandbox-id`r`nexit /b 0`r`n")
+        [IO.File]::WriteAllText($fakeDocker, "@echo off`r`nchcp 65001 >nul`r`necho %*>>`"%DAMIR_TEST_LOG%`"`r`necho %DAMIR_WORKSPACE%^|%DAMIR_SESSION_ID%^|%DAMIR_MEMORY_PROJECT%^|%DAMIR_WORKSPACE_LABEL%>>`"%DAMIR_TEST_WORKSPACE_LOG%`"`r`nif `"%DAMIR_TEST_FAIL%`"==`"1`" exit /b 23`r`necho test-sandbox-id`r`nexit /b 0`r`n")
         [IO.File]::WriteAllText((Join-Path $fakeBin 'git.cmd'), "@echo off`r`nexit /b 1`r`n")
     } else {
         $fakeGit = Join-Path $fakeBin 'git'
@@ -91,6 +93,7 @@ exit 0
     $second = [IO.File]::ReadAllLines($env:DAMIR_TEST_WORKSPACE_LOG)[0].Split('|')
     if ($first[0] -ne $todo -or $second[0] -ne $other -or $first[1] -notlike 'workspace-*' -or $first[1] -eq $second[1]) { throw 'Рабочие папки или истории не разделены.' }
     if ($first[2] -notlike 'workspace-*' -or $first[2] -eq $second[2]) { throw 'Память проектов не разделена.' }
+    if ($IsWindows -and ($first[3] -ne 'Todo List' -or $second[3] -ne 'Other Project')) { throw 'Название текущей рабочей папки не передано backend.' }
     $env:DAMIR_SESSION_ID = 'new-session'
     [IO.File]::WriteAllText($env:DAMIR_TEST_WORKSPACE_LOG, '')
     Push-Location -LiteralPath $todo
@@ -114,7 +117,7 @@ exit 0
     $env:TELEGRAM_ALLOWED_USER_ID = '900001'
     $env:TELEGRAM_ALLOWED_USER_IDS = '900001, 900002,900001'
     [IO.File]::WriteAllText($env:DAMIR_TEST_LOG, '')
-    $telegramOutput = (& $pwsh -NoLogo -NoProfile -File $launcher telegram 2>&1 | Out-String)
+    $telegramOutput = (& $pwsh -NoLogo -NoProfile -File $launcher telegram-isolated 2>&1 | Out-String)
     if ($LASTEXITCODE -ne 0) { throw 'Telegram launcher failed.' }
     $telegramCalls = [IO.File]::ReadAllText($env:DAMIR_TEST_LOG)
     if ($telegramCalls -notmatch 'compose run --no-deps --rm --name damir-tg-router-[a-f0-9]+ telegram' -or
@@ -131,7 +134,7 @@ exit 0
     $telegramHarness = Join-Path $fixtureDir 'telegram-input-check.ps1'
     $harness = @'
 param([switch] $ConfigureTelegram, [switch] $ExpectPrompts,
-    [string] $TestCommand = 'telegram', [string] $SetupIds = '900003',
+    [string] $TestCommand = 'telegram-isolated', [string] $SetupIds = '900003',
     [string] $SetupToken = '654321:synthetic_token_not_a_real_secret')
 $ErrorActionPreference = 'Stop'
 function Read-Host([string] $Prompt, [switch] $AsSecureString) {
@@ -199,7 +202,7 @@ exit $LASTEXITCODE
     [IO.File]::WriteAllText($env:DAMIR_TEST_LOG, '')
     $env:TELEGRAM_ALLOWED_USER_ID = '0'
     $env:TELEGRAM_ALLOWED_USER_IDS = '900001,invalid'
-    $null = & $pwsh -NoLogo -NoProfile -File $launcher telegram 2>&1
+    $null = & $pwsh -NoLogo -NoProfile -File $launcher telegram-isolated 2>&1
     if ($LASTEXITCODE -eq 0 -or [IO.File]::ReadAllLines($env:DAMIR_TEST_LOG).Count -ne 0) { throw 'Invalid Telegram owner did not stop launch before Docker.' }
     [IO.File]::WriteAllText($env:DAMIR_TEST_WORKSPACE_LOG, '')
     Push-Location -LiteralPath $todo
@@ -254,5 +257,6 @@ exit $LASTEXITCODE
     $env:TELEGRAM_BOT_TOKEN = $oldTelegramToken
     $env:TELEGRAM_ALLOWED_USER_ID = $oldTelegramUser
     $env:TELEGRAM_ALLOWED_USER_IDS = $oldTelegramUsers
+    $env:DAMIR_SETTINGS_DIR = $oldSettingsDir
     if ([IO.Directory]::Exists($fixtureDir)) { [IO.Directory]::Delete($fixtureDir, $true) }
 }

@@ -49,14 +49,14 @@ internal static class CliCompositionChecks
         var transcript = await RunCliAsync(http.BaseAddress!, key, "/skill merged-skill\ncli-from-process\n/tokens\n/context\n/compress\n/session\n/exit\n");
         Check(transcript.ExitCode == 0 && transcript.Output.Contains("saved through Core") && transcript.Output.Contains("Готово.") && !transcript.Output.Contains(key), "real CLI process uses HTTP commands and exits without leaking credentials");
         var reconnect = await RunCliAsync(http.BaseAddress!, key, "/session\n/exit\n");
-        Check(reconnect.ExitCode == 0 && reconnect.Output.Contains("Последняя задача:"), "real CLI restart recovers session and last receipt");
+        Check(reconnect.ExitCode == 0 && reconnect.Output.Contains("/last") && !reconnect.Output.Contains("Последняя задача:"), "real CLI restart offers the saved receipt without exposing technical task IDs");
         return count;
     }
 
     public static async Task RunOfflineCatalogAsync(HttpClient http, string key)
     {
         var result = await RunCliAsync(http.BaseAddress!, key, "/session\n/exit\n");
-        if (result.ExitCode != 0 || !result.Output.Contains("Последняя задача:") || !result.Output.Contains("Каталог моделей недоступен"))
+        if (result.ExitCode != 0 || !result.Output.Contains("/last") || !result.Output.Contains("Каталог моделей недоступен"))
             throw new Exception("CLI could not recover task receipts while model catalog was unavailable");
         Console.WriteLine("PASS: CLI starts and recovers durable task receipts with unavailable model catalog");
     }

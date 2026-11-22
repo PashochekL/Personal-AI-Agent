@@ -14,8 +14,8 @@ damir backend
 ```
 
 Из корня этого репозитория: `.\damir.cmd backend` на Windows или
-`./damir backend` на Linux/macOS. Запуск из корня использует `workspace`, как
-демонстрационная консоль. HTTP доступен только на `127.0.0.1:8080`. Остановка —
+`./damir backend` на Linux/macOS. Рабочая папка — папка запуска; домашняя папка
+и корень диска отклоняются. HTTP доступен только на `127.0.0.1:8080`. Остановка —
 Ctrl+C. `DAMIR_BACKEND_PORT` меняет порт, `DEFAULT_MODEL` выбирает модель перед
 запуском. Launcher поднимает БД, Redis, Gateway, память и отдельную песочницу;
 при выходе убирает только собственную песочницу и её IPC-том. Базы остаются.
@@ -144,11 +144,26 @@ launcher. Логи содержат ID и события задач, а не т�
 Обычный `damir` теперь запускает CLI через собственный HTTP backend без
 публикации порта на хост. Команды, сессии и повтор после потери ответа описаны
 в [CLI.md](CLI.md). Демонстрационный прямой запуск Core сохранён отдельно.
-Telegram-клиент подключён через те же маршруты, но каждому разрешённому ID
-назначаются отдельный backend, ключ, owner/project и workspace.
-Защищённый `GET /identity` возвращает `owner_id` и `project_id` для проверки
-маршрутизации до открытия сессии. Запуск и ограничения описаны
-в [TELEGRAM.md](TELEGRAM.md). Доступ ограничен настроенным списком Telegram ID.
+Персональный `/tg` подключает Telegram к текущему backend и сессии. Одноразовая
+ссылка привязывает фактический ID; `channel` в `/tasks` проверяется под той же
+блокировкой строки сессии, что и переключение интерфейса. Переключение во время
+PENDING/RUNNING отклоняется с 423. Маршруты `/telegram/link`,
+`/telegram/{botId}/{lease}` и их `connect`, `resume`, `selection`, `checkpoint`, `release`,
+`/sessions/{id}/console`, `/sessions/{id}/telegram-files` и подтверждение
+`/sessions/{id}/telegram-files/{file}/ack` защищены общим bearer-ключом.
+`POST/GET /console/resume` однократно сохраняют/забирают выбор диалога на время
+первой настройки токена. Состояние находится в `damir_telegram_companion`,
+файлы — в `damir_telegram_files`, выбор — в `damir_console_resume`.
+Поле `confirmed_lease` требует свежей ссылки на каждый новый запуск или сессию;
+до подтверждения приём Telegram-сообщений и возврат по кнопке отклоняются.
+`pending_operation` сохраняет `chat`, `context` или `compress` вместе с
+транспортной квитанцией. `selection` меняет модель и навык только у свободного
+подтверждённого диалога. Название папки передаётся через `DAMIR_WORKSPACE_LABEL`;
+это подпись интерфейса, а не выбираемый клиентом путь workspace.
+
+В отдельном административном режиме каждому разрешённому ID назначаются
+отдельный backend, ключ, owner/project и workspace; `GET /identity` проверяет
+назначение. Запуск и ограничения описаны в [TELEGRAM.md](TELEGRAM.md).
 
 Без Docker-композиции backend можно запустить через
 `dotnet run --project src/ai_agent/interfaces/api/Api.csproj`, настроив

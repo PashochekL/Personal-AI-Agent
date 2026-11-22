@@ -6,7 +6,7 @@ using TaskStatus = AiAgent.Shared.TaskStatus;
 namespace AiAgent.Api;
 
 /// <summary>Durable admission, ordered execution and terminal results. Redis carries only notifications.</summary>
-public sealed class PostgresTaskStore(NpgsqlDataSource database, BackendOptions options)
+public sealed partial class PostgresTaskStore(NpgsqlDataSource database, BackendOptions options)
 {
     private NpgsqlCommand Scoped(string sql, NpgsqlConnection? connection = null, NpgsqlTransaction? transaction = null)
     {
@@ -37,6 +37,23 @@ public sealed class PostgresTaskStore(NpgsqlDataSource database, BackendOptions 
             ALTER TABLE damir_api_sessions ADD COLUMN IF NOT EXISTS client_name text;
             CREATE UNIQUE INDEX IF NOT EXISTS damir_api_named_session ON damir_api_sessions(owner_id,project_id,client_name);
             ALTER TABLE damir_api_tasks ADD COLUMN IF NOT EXISTS selection text NOT NULL DEFAULT '{}';
+            ALTER TABLE damir_api_sessions ADD COLUMN IF NOT EXISTS input_channel text NOT NULL DEFAULT 'console';
+            CREATE TABLE IF NOT EXISTS damir_telegram_companion (
+                bot_id bigint PRIMARY KEY, owner_id text NOT NULL, project_id text NOT NULL,
+                session_id text NOT NULL REFERENCES damir_api_sessions(session_id), user_id bigint,
+                link_hash text, link_expires timestamptz, lease text NOT NULL, lease_expires timestamptz NOT NULL,
+                update_offset bigint NOT NULL DEFAULT 0, pending_task text, parts text[], next_part integer NOT NULL DEFAULT 0,
+                model text, skill text);
+            ALTER TABLE damir_telegram_companion ADD COLUMN IF NOT EXISTS pending_update bigint;
+            ALTER TABLE damir_telegram_companion ADD COLUMN IF NOT EXISTS pending_message text;
+            ALTER TABLE damir_telegram_companion ADD COLUMN IF NOT EXISTS confirmed_lease text;
+            ALTER TABLE damir_telegram_companion ADD COLUMN IF NOT EXISTS pending_operation text NOT NULL DEFAULT 'chat';
+            CREATE TABLE IF NOT EXISTS damir_telegram_files (
+                file_id text PRIMARY KEY, session_id text NOT NULL REFERENCES damir_api_sessions(session_id),
+                filename text NOT NULL, content bytea NOT NULL, created_at timestamptz NOT NULL DEFAULT now());
+            CREATE TABLE IF NOT EXISTS damir_console_resume (
+                owner_id text NOT NULL, project_id text NOT NULL, session_id text NOT NULL,
+                model text, skill text, PRIMARY KEY(owner_id,project_id));
             """);
         await command.ExecuteNonQueryAsync(ct);
     }
@@ -118,6 +135,7 @@ public sealed class PostgresTaskStore(NpgsqlDataSource database, BackendOptions 
     public async Task<AgentTask> SubmitAsync(TaskRequest request, string? requestKey, CancellationToken ct = default)
     {
         request.Selection.Validate();
+        if (request.Channel is not ("console" or "telegram")) throw new TaskAdmissionException(400, "Invalid input channel.");
         if (string.IsNullOrWhiteSpace(request.SessionId) || request.SessionId.Length > 128 || string.IsNullOrWhiteSpace(request.UserMessage) || request.UserMessage.Length > 32000)
             throw new TaskAdmissionException(400, "Invalid session_id or user_message (maximum 32000 characters).");
         if (requestKey is not null && (requestKey.Length is < 1 or > 128 || requestKey.Any(c => c is < '!' or > '~')))
@@ -141,6 +159,12 @@ public sealed class PostgresTaskStore(NpgsqlDataSource database, BackendOptions 
                     throw new TaskAdmissionException(409, "Idempotency-Key has a different request.");
                 return previous;
             }
+        }
+        await using (var channel = new NpgsqlCommand("SELECT input_channel FROM damir_api_sessions WHERE session_id=$1", connection, transaction))
+        {
+            channel.Parameters.AddWithValue(request.SessionId);
+            if ((string)(await channel.ExecuteScalarAsync(ct))! != request.Channel)
+                throw new TaskAdmissionException(423, "Диалог открыт в другом месте. Для возврата в консоль введи /console, для Telegram — /tg.");
         }
         await using (var count = new NpgsqlCommand("SELECT count(*) FROM damir_api_tasks WHERE session_id=$1 AND status IN ('PENDING','RUNNING')", connection, transaction))
         {

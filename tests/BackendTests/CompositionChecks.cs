@@ -109,6 +109,7 @@ static class CompositionChecks
             try { await CliCompositionChecks.RunOfflineCatalogAsync(http, options.ApiKey); }
             finally { Interlocked.Exchange(ref catalogUnavailable, 0); }
             var telegramCount = await TelegramCompositionChecks.RunAsync(http, options.ApiKey, options.Scope);
+            var menuCount = await TelegramMenuChecks.RunAsync(http, options.ApiKey, options.Database);
             var isolationCount = await IsolatedAccountsChecks.RunAsync(options);
             await app.StopAsync();
             Console.WriteLine("PASS: production composition executes Core memory tool through gateway HTTP");
@@ -116,7 +117,7 @@ static class CompositionChecks
             Console.WriteLine("PASS: production composition persists tool call IDs and results");
             Console.WriteLine("PASS: production composition advertises upstream web.search tool");
             Console.WriteLine("PASS: .agents instructions and skills coexist with long-term memory");
-            return 8 + cliCount + telegramCount + isolationCount;
+            return 8 + cliCount + telegramCount + menuCount + isolationCount;
         }
         finally
         {
