@@ -1,5 +1,6 @@
 using AiAgent.Http;
 using AiAgent.Shared;
+using AiAgent.Telegram;
 using System.Net;
 using System.Text.Json;
 using TaskStatus = AiAgent.Shared.TaskStatus;
@@ -13,6 +14,9 @@ try
 {
     var address = new Uri(Environment.GetEnvironmentVariable("DAMIR_BACKEND_URL") ?? "http://127.0.0.1:8080");
     var client = new BackendClient(http, address, Environment.GetEnvironmentVariable("DAMIR_BACKEND_API_KEY") ?? "");
+    using var telegramHttp = new HttpClient(new SocketsHttpHandler { AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(40) };
+    var telegramToken = Environment.GetEnvironmentVariable("TELEGRAM_BOT_TOKEN");
+    await using var companion = string.IsNullOrWhiteSpace(telegramToken) ? null : new TelegramCompanion(new TelegramApi(telegramHttp, telegramToken), client, Console.Error);
     using (var startup = CancellationTokenSource.CreateLinkedTokenSource(stop.Token))
     {
         startup.CancelAfter(TimeSpan.FromSeconds(60));
@@ -35,16 +39,22 @@ try
     string? pendingSkill = null;
     Submission? pending = null;
     string? activeTask = null;
+    if (Environment.GetEnvironmentVariable("DAMIR_TELEGRAM_AUTO_OPEN") == "1" && companion is not null)
+    {
+        var resume = await client.ConsoleResumeAsync(stop.Token);
+        if (resume is not null) { session = await client.SessionAsync(resume.SessionId, stop.Token); selected = resume.Model; pendingSkill = resume.Skill; }
+        Console.WriteLine("Открой ссылку и нажми «Начать»: " + await companion.LinkAsync(session.SessionId, selected, pendingSkill, stop.Token));
+    }
     using var paste = new TerminalPasteMode(Console.Out, !Console.IsInputRedirected && !Console.IsOutputRedirected);
     paste.SetEnabled(true);
-    Console.WriteLine($"Дамир готов. Модель: {selected ?? "не выбрана"}. Сессия: {session.SessionId}. Команды: /help.");
-    if (await client.LatestAsync(session.SessionId, stop.Token) is { } latest)
-        Console.WriteLine($"Последняя задача: {latest.TaskId}, {latest.Status}. /task {latest.TaskId} — посмотреть результат.");
+    Console.WriteLine($"Дамир готов. Модель: {selected ?? "не выбрана"}. /tg — продолжить в Telegram. /help — помощь.");
+    if (await client.LatestAsync(session.SessionId, stop.Token) is not null)
+        Console.WriteLine("Предыдущий запрос сохранён. /last — посмотреть ответ или дождаться завершения.");
 
     async Task ShowTaskAsync(string id, CancellationToken ct)
     {
         activeTask = id;
-        Console.WriteLine($"Задача: {id}. Ctrl+C — запросить отмену.");
+        Console.WriteLine("Дамир отвечает. Ctrl+C — остановить.");
         var task = await client.WaitAsync(id, ct);
         activeTask = null;
         Console.WriteLine(task.Result?.Response ?? task.Result?.Error ?? (task.Status == TaskStatus.CANCELLED ? "Задача отменена." : task.Status.ToString()));
@@ -73,7 +83,8 @@ try
         {
             if (!isPaste && command == "/help")
             {
-                Console.WriteLine("/models — выбрать модель\n/tokens — расход токенов\n/context — заполнение контекста\n/compress — сжать контекст\n/skill [имя|0] — выбрать или отменить навык\n/multi — многострочное сообщение\n/session [ID] — показать или открыть сессию\n/new — новая сессия\n/task ID — дождаться задачи\n/cancel ID — отменить задачу\n/retry — повторить отправку с тем же ключом\n/discard — забыть неясную отправку (задача могла быть принята)\n/github-login, /github-logout — подключить или отключить GitHub\n/exit — выход");
+                Console.WriteLine("/last — открыть последний ответ без ввода ID");
+                Console.WriteLine("/tg — продолжить этот диалог в Telegram\n/console — вернуть диалог на компьютер\n/models — выбрать модель\n/tokens — расход токенов\n/context — заполнение контекста\n/compress — сжать контекст\n/skill [имя|0] — выбрать или отменить навык\n/multi — многострочное сообщение\n/session [ID] — показать или открыть сессию\n/new — новая сессия\n/task ID — дождаться задачи\n/cancel ID — отменить задачу\n/retry — повторить отправку с тем же ключом\n/discard — забыть неясную отправку (задача могла быть принята)\n/github-login, /github-logout — подключить или отключить GitHub\n/exit — выход");
                 continue;
             }
             if (!isPaste && command == "/tokens")
@@ -82,12 +93,38 @@ try
                 Console.WriteLine($"{(usage.MissingUsageResponses > 0 ? "≥" : "")}{usage.Total}"); continue;
             }
             if (!isPaste && command == "/session") { Console.WriteLine(session.SessionId); continue; }
+            if (!isPaste && command == "/last")
+            {
+                if (await client.LatestAsync(session.SessionId, turn.Token) is { } last) await ShowTaskAsync(last.TaskId, turn.Token);
+                else Console.WriteLine("В этом диалоге пока нет ответов.");
+                continue;
+            }
             if (!isPaste && command.StartsWith("/task ", StringComparison.Ordinal)) { await ShowTaskAsync(command[6..].Trim(), turn.Token); continue; }
             if (!isPaste && command.StartsWith("/cancel ", StringComparison.Ordinal))
             { var task = await client.CancelAsync(command[8..].Trim(), turn.Token); Console.WriteLine($"Запрос отмены: {task.TaskId}, {task.Status}."); continue; }
             if (!isPaste && command == "/discard") { pending = null; Console.WriteLine("Ключ забыт. Уже принятую задачу это не отменяет."); continue; }
             if (pending is not null && (isPaste || command != "/retry"))
             { Console.WriteLine("Сначала /retry для проверки прежней отправки или /discard. Её задача могла быть принята."); continue; }
+            if (!isPaste && command == "/tg")
+            {
+                if (companion is null)
+                {
+                    await client.SaveConsoleResumeAsync(session.SessionId, selected, pendingSkill, turn.Token);
+                    Console.WriteLine("Для первого подключения нужен токен твоего бота. Сейчас launcher предложит ввести его один раз и сохранит настройку.");
+                    return 73;
+                }
+                Console.WriteLine("Подготавливаю ссылку на Telegram…");
+                Console.WriteLine("Открой ссылку и нажми «Начать»: " + await companion.LinkAsync(session.SessionId, selected, pendingSkill, turn.Token));
+                Console.WriteLine("Ссылка действует 10 минут. После открытия продолжай в Telegram. Для возврата сюда: /console или кнопка «На компьютер» в боте. Оставь это окно и компьютер включёнными.");
+                pendingSkill = null; continue;
+            }
+            if (!isPaste && command == "/console")
+            {
+                await client.ReturnToConsoleAsync(session.SessionId, turn.Token);
+                var recent = (await client.MessagesAsync(session.SessionId, turn.Token)).Where(m => m.Role is "user" or "assistant" && !string.IsNullOrWhiteSpace(m.Content)).TakeLast(6);
+                foreach (var message in recent) Console.WriteLine((message.Role == "user" ? "Ты: " : "Дамир: ") + message.Content);
+                Console.WriteLine("Диалог снова на компьютере. Можно продолжать."); continue;
+            }
             if (!isPaste && command is "/github-login" or "damir github-login") return 71;
             if (!isPaste && command is "/github-logout" or "damir github-logout") return 72;
             if (!isPaste && (command == "/new" || command.StartsWith("/session ", StringComparison.Ordinal)))
@@ -154,10 +191,10 @@ try
                 activeTask = null;
             }
         }
-        catch (Exception e) when (e is BackendException or JsonException or ArgumentException or InvalidOperationException)
+        catch (Exception e) when (e is BackendException or TelegramException or JsonException or ArgumentException or InvalidOperationException)
         {
-            if (e is BackendException { Status: HttpStatusCode.BadRequest or HttpStatusCode.NotFound or HttpStatusCode.Conflict or HttpStatusCode.TooManyRequests }) pending = null;
-            Console.Error.WriteLine(e is BackendException or ArgumentException ? e.Message : "Некорректный ответ backend.");
+            if (e is BackendException { Status: HttpStatusCode.BadRequest or HttpStatusCode.NotFound or HttpStatusCode.Conflict or HttpStatusCode.TooManyRequests or (HttpStatusCode)423 }) pending = null;
+            Console.Error.WriteLine(e is BackendException or TelegramException or ArgumentException ? e.Message : "Некорректный ответ backend.");
             if (pending is not null) Console.Error.WriteLine($"Результат отправки неизвестен. /retry использует прежний ключ: {pending.RequestKey}");
             if (activeTask is not null) { Console.Error.WriteLine($"Задача могла продолжить работу. /task {activeTask}"); activeTask = null; }
         }
@@ -169,5 +206,5 @@ try
 catch (OperationCanceledException)
 { if (!stop.IsCancellationRequested) Console.Error.WriteLine("Не удалось дождаться готовности backend."); return stop.IsCancellationRequested ? 0 : 1; }
 catch (UriFormatException) { Console.Error.WriteLine("Некорректный адрес backend."); return 1; }
-catch (Exception e) when (e is BackendException or ArgumentException or JsonException or InvalidOperationException)
-{ Console.Error.WriteLine(e is BackendException or ArgumentException ? e.Message : "Не удалось запустить HTTP-консоль."); return 1; }
+catch (Exception e) when (e is BackendException or TelegramException or ArgumentException or JsonException or InvalidOperationException)
+{ Console.Error.WriteLine(e is BackendException or TelegramException or ArgumentException ? e.Message : "Не удалось запустить HTTP-консоль."); return 1; }

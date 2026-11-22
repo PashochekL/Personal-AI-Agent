@@ -9,6 +9,7 @@
   <ItemGroup>
     <ProjectReference Include="../../shared/Shared.csproj" />
     <ProjectReference Include="../http/Http.csproj" />
+    <ProjectReference Include="../telegram/Telegram.csproj" />
     <Compile Include="../../../../examples/SandboxConsole/ConsoleInput.cs" Link="ConsoleInput.cs" />
     <Compile Include="../../../../examples/SandboxConsole/StartupBanner.cs" Link="StartupBanner.cs" />
   </ItemGroup>

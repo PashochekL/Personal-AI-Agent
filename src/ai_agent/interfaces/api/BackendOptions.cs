@@ -11,6 +11,7 @@ public sealed class BackendOptions
     public required string ApiKey { get; init; }
     public required MemoryScope Scope { get; init; }
     public string Url { get; init; } = "http://127.0.0.1:8080";
+    public string WorkspaceName { get; init; } = "текущий проект";
     public int Workers { get; init; } = 2;
     public TimeSpan TaskTimeout { get; init; } = TimeSpan.FromMinutes(5);
     public TimeSpan PollInterval { get; init; } = TimeSpan.FromMilliseconds(300);
@@ -20,6 +21,7 @@ public sealed class BackendOptions
         Scope.Validate();
         ArgumentException.ThrowIfNullOrWhiteSpace(Database);
         ArgumentException.ThrowIfNullOrWhiteSpace(Redis);
+        if (string.IsNullOrWhiteSpace(WorkspaceName) || WorkspaceName.Length > 256 || WorkspaceName.Any(char.IsControl)) throw new ArgumentException("Invalid workspace name.");
         if (ApiKey.Length is < 24 or > 512 || ApiKey.Any(char.IsWhiteSpace)) throw new ArgumentException("Invalid backend API key");
         if (Workers is < 1 or > 8 || TaskTimeout < TimeSpan.FromSeconds(1) || TaskTimeout > TimeSpan.FromHours(1)
             || PollInterval < TimeSpan.FromMilliseconds(20) || PollInterval > TimeSpan.FromSeconds(5)) throw new ArgumentException("Invalid worker limits");
@@ -41,6 +43,7 @@ public sealed class BackendOptions
             Database = database, Redis = Get("REDIS_URL") ?? "redis:6379", ApiKey = Get("DAMIR_BACKEND_API_KEY") ?? "",
             Scope = new MemoryScope { OwnerId = Get("DAMIR_MEMORY_OWNER") ?? "local", ProjectId = Get("DAMIR_MEMORY_PROJECT") ?? "" },
             Url = Get("DAMIR_BACKEND_URL") ?? "http://127.0.0.1:8080",
+            WorkspaceName = Get("DAMIR_WORKSPACE_LABEL") ?? "текущий проект",
             Workers = int.Parse(Get("DAMIR_BACKEND_WORKERS") ?? "2"),
             TaskTimeout = TimeSpan.FromSeconds(int.Parse(Get("DAMIR_TASK_TIMEOUT_SECONDS") ?? "300"))
         };
@@ -54,6 +57,7 @@ public sealed class TaskRequest
     public string? Model { get; init; }
     public string? Skill { get; init; }
     public string Operation { get; init; } = "chat";
+    public string Channel { get; init; } = "console";
 
     [System.Text.Json.Serialization.JsonIgnore]
     public TaskSelection Selection => new(Model, Skill, Operation);

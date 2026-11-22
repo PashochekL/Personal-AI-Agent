@@ -16,6 +16,7 @@ public sealed class TelegramBot(TelegramApi telegram, BackendClient backend, Tel
             var bot = await telegram.IdentityAsync(ct);
             if (!bot.IsBot || bot.Id != options.BotId) throw new TelegramException("Токен не соответствует Telegram-боту.", true);
             await telegram.EnsurePollingAsync(ct);
+            await telegram.SetSimpleCommandsAsync(ct);
         }
         if (!state.Initialized)
         {
@@ -76,10 +77,11 @@ public sealed class TelegramBot(TelegramApi telegram, BackendClient backend, Tel
         var command = split < 0 ? text : text[..split];
         var argument = split < 0 ? "" : text[(split + 1)..].Trim();
         command = command.Split('@')[0];
+        command = text switch { "Помощь" => "/help", "Новый диалог" => "/new", "Остановить" => "/cancel", _ => command };
         switch (command)
         {
             case "/start": case "/help":
-                await ReplyAsync(update.UpdateId, "Дамир подключён к общему серверу.\n/session [ID] — текущая или существующая сессия\n/new — новая сессия\n/status [ID] — состояние задачи\n/cancel [ID] — запрос отмены\n/models [номер] — список или выбор модели\n/skill [имя|0] — список, выбор или отмена навыка\n/tokens — расход токенов\n/context — оценка контекста\n/compress — сжатие контекста\nОбычный текст отправляется агенту.", ct); return;
+                await ReplyAsync(update.UpdateId, "Привет, я Дамир. Просто напиши, чем помочь.\nВнизу есть кнопки: начать новый диалог, остановить ответ и открыть помощь.\nЭто отдельный Telegram-диалог. Чтобы продолжить разговор с компьютера, запусти там Дамира и введи /tg.\nКогда компьютер или Дамир выключен, я не отвечаю.", ct); return;
             case "/session":
                 if (argument.Length == 0) { await ReplyAsync(update.UpdateId, "Сессия: " + snapshot.SessionId, ct); return; }
                 if (!ValidId(argument)) { await ReplyAsync(update.UpdateId, "Нужен ID сессии из консоли Дамира.", ct); return; }
@@ -92,7 +94,7 @@ public sealed class TelegramBot(TelegramApi telegram, BackendClient backend, Tel
                 return;
             case "/new":
                 var created = await backend.ResolveSessionAsync($"telegram-{options.BotId}-{update.UpdateId}", ct);
-                await ReplyAsync(update.UpdateId, "Новая сессия: " + created.SessionId, ct, s => s with { SessionId = created.SessionId, Skill = null }); return;
+                await ReplyAsync(update.UpdateId, "Начали новый диалог. О чём поговорим?", ct, s => s with { SessionId = created.SessionId, Skill = null }); return;
             case "/models":
                 var catalog = await backend.CatalogAsync(ct);
                 if (argument.Length == 0)
@@ -120,7 +122,7 @@ public sealed class TelegramBot(TelegramApi telegram, BackendClient backend, Tel
             case "/context": case "/compress":
                 await EnqueueAsync(update.UpdateId, text, command[1..], ct); return;
         }
-        if (text.StartsWith('/')) { await ReplyAsync(update.UpdateId, "Неизвестная команда. /help — список команд.", ct); return; }
+        if (text.StartsWith('/')) { await ReplyAsync(update.UpdateId, "Просто напиши сообщение или выбери кнопку внизу.", ct); return; }
         await EnqueueAsync(update.UpdateId, message.Text!, "chat", ct);
     }
 
@@ -130,7 +132,7 @@ public sealed class TelegramBot(TelegramApi telegram, BackendClient backend, Tel
         {
             var s = current!;
             if (s.Deliveries.Count(d => d.Request is not null && d.Parts is null) >= 20)
-                return AddReply(s, updateId, "Уже ожидают 20 сообщений. Дождись ответов или используй /cancel.");
+                return AddReply(s, updateId, "Уже ожидают 20 сообщений. Дождись ответов или нажми «Остановить».");
             var request = new Submission(s.SessionId, text, s.Model, operation == "chat" ? s.Skill : null, operation, $"telegram:{options.BotId}:{updateId}");
             return s with { Offset = checked(updateId + 1), Skill = operation == "chat" ? null : s.Skill,
                 Pending = [..s.Deliveries, new(updateId, s.SessionId, request)] };
@@ -155,7 +157,7 @@ public sealed class TelegramBot(TelegramApi telegram, BackendClient backend, Tel
         {
             if (local?.TaskId == task.TaskId) await UpdateDeliveryAsync(local.UpdateId, d => d with { CancelRequested = true }, ct);
             task = await backend.CancelAsync(task.TaskId, ct);
-            await ReplyAsync(updateId, $"Запрос отмены: {task.TaskId}, {task.Status}. Уже выполненные действия не отменяются.", ct); return;
+            await ReplyAsync(updateId, "Останавливаю ответ. Уже выполненные действия сохраняются.", ct); return;
         }
         await ReplyAsync(updateId, $"Задача: {task.TaskId}\nСостояние: {task.Status}\n" + (task.Result?.Response ?? task.Result?.Error ?? ""), ct);
     }
@@ -166,7 +168,7 @@ public sealed class TelegramBot(TelegramApi telegram, BackendClient backend, Tel
     private Task ReplyAsync(long id, string text, CancellationToken ct, Func<TelegramState, TelegramState>? change = null) =>
         state.ChangeAsync(s => AddReply(change?.Invoke(s!) ?? s!, id, text), ct);
     public Task UnavailableAsync(long updateId, CancellationToken ct) =>
-        ReplyAsync(updateId, "Сервер этого аккаунта временно недоступен. Повтори команду позже. Если запрашивал отмену, проверь /status после восстановления связи.", ct);
+        ReplyAsync(updateId, "Дамир временно недоступен. Повтори сообщение позже. Если останавливал ответ, проверь результат после восстановления связи.", ct);
     private Task UpdateDeliveryAsync(long id, Func<TelegramDelivery, TelegramDelivery> change, CancellationToken ct) =>
         state.ChangeAsync(s => s! with { Pending = s.Deliveries.Select(d => d.UpdateId == id ? change(d) : d).ToArray() }, ct);
 
@@ -213,7 +215,7 @@ public sealed class TelegramBot(TelegramApi telegram, BackendClient backend, Tel
             }
             if (delivery.Parts is { } parts && delivery.NextPart < parts.Length)
             {
-                await telegram.SendAsync(options.AllowedUserId, parts[delivery.NextPart], ct);
+                await telegram.SendMenuAsync(options.AllowedUserId, parts[delivery.NextPart], ct, personal: false);
                 await UpdateDeliveryAsync(delivery.UpdateId, d => d with { NextPart = d.NextPart + 1 }, ct);
                 await Task.Delay(1050, ct);
             }

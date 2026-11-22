@@ -121,6 +121,7 @@ try
     var foreignNamed = await foreign.ResolveSessionAsync("same-name", default);
     Check(ownNamed.SessionId != foreignNamed.SessionId, "named conversations are isolated by owner/project");
     var store = app.Services.GetRequiredService<PostgresTaskStore>();
+    count += await CompanionChecks.RunAsync(client, options, store, db);
     await using (var duplicate = await store.TryWorkerLeaseAsync(default)) Check(duplicate is null, "second Worker excluded by PostgreSQL lease");
 
     // Stop cleanly, inject the exact persisted states left by an abrupt process death, then start a fresh host.
@@ -169,6 +170,7 @@ try
     Check((await Wait(recovered, durable.TaskId)).Status == TaskStatus.COMPLETED && factory.Calls["redis-was-offline"] == 1, "pending task executes once after Redis reconnect");
 
     await app.StopAsync(); await app.DisposeAsync(); app = null;
+    count += await WorkspaceHandoffChecks.RunAsync(options);
     count += await CompositionChecks.RunAsync(options);
     Console.WriteLine($"Backend checks passed: {count}");
     return 0;
@@ -176,7 +178,7 @@ try
 finally
 {
     if (app is not null) { await app.StopAsync(); await app.DisposeAsync(); }
-    foreach (var table in new[] { "damir_demo_summaries", "damir_demo_context", "damir_demo_history", "damir_api_tasks", "damir_api_sessions" })
+    foreach (var table in new[] { "damir_telegram_files", "damir_telegram_companion", "damir_console_resume", "damir_demo_summaries", "damir_demo_context", "damir_demo_history", "damir_api_tasks", "damir_api_sessions" })
     {
         await using var cleanup = db.CreateCommand($"DELETE FROM {table} WHERE session_id IN (SELECT session_id FROM damir_api_sessions WHERE owner_id=$1 AND project_id=$2)");
         cleanup.Parameters.AddWithValue(scope.OwnerId); cleanup.Parameters.AddWithValue(scope.ProjectId); await cleanup.ExecuteNonQueryAsync();

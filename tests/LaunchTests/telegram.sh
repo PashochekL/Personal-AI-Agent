@@ -20,7 +20,7 @@ export TELEGRAM_BOT_TOKEN='123456:synthetic_token_not_a_real_secret' TELEGRAM_AL
 export TELEGRAM_ALLOWED_USER_IDS='900001, 900002,900001'
 unset DAMIR_GITHUB_TOKEN || true
 cd "$fixture/project"
-sh ./damir telegram > "$fixture/output"
+sh ./damir telegram-isolated > "$fixture/output"
 grep -q -- '--name damir-tg-.*-900001 telegram-backend' "$TELEGRAM_LAUNCH_LOG"
 grep -q -- '--name damir-tg-.*-900002 telegram-backend' "$TELEGRAM_LAUNCH_LOG"
 grep -q 'compose run --no-deps --rm --name damir-tg-router-.* telegram' "$TELEGRAM_LAUNCH_LOG"
@@ -31,6 +31,6 @@ if grep -q "$TELEGRAM_BOT_TOKEN" "$fixture/output"; then exit 1; fi
 TELEGRAM_ALLOWED_USER_ID=invalid
 TELEGRAM_ALLOWED_USER_IDS='900001,invalid'
 export TELEGRAM_ALLOWED_USER_ID TELEGRAM_ALLOWED_USER_IDS
-if sh ./damir telegram > "$fixture/output" 2>&1; then exit 1; fi
+if sh ./damir telegram-isolated > "$fixture/output" 2>&1; then exit 1; fi
 [ ! -s "$TELEGRAM_LAUNCH_LOG" ]
 printf '%s\n' 'Unix Telegram launch and owner validation checks passed'

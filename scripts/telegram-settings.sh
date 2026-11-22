@@ -1,7 +1,37 @@
 # Sourced by damir. Keep credentials in the OS store, never in a plaintext file.
+damir_personal_telegram() {
+  personal_mode=$1
+  personal_platform=$(uname -s)
+  telegram_keychain_account="damir-$(printf '%s' "$project_dir" | openssl dgst -sha256 | awk '{print $NF}')"
+  if [ "$personal_mode" != replace ] && [ -z "${TELEGRAM_BOT_TOKEN:-}" ]; then
+    if [ "$personal_platform" = Darwin ]; then
+      personal_credentials=$(damir_telegram_keychain get 2>/dev/null) || personal_credentials=
+      TELEGRAM_BOT_TOKEN=$(printf '%s\n' "$personal_credentials" | sed -n 's/^password=//p')
+      personal_credentials=
+    elif command -v secret-tool >/dev/null 2>&1; then
+      TELEGRAM_BOT_TOKEN=$(secret-tool lookup service damir-telegram account "$telegram_keychain_account" 2>/dev/null) || TELEGRAM_BOT_TOKEN=
+    fi
+  fi
+  if [ -z "${TELEGRAM_BOT_TOKEN:-}" ] && { [ "$personal_mode" = setup ] || [ "$personal_mode" = replace ]; }; then
+    printf '%s\n' 'Открой https://t.me/BotFather, создай своего бота и скопируй токен. Telegram ID вводить не надо.'
+    damir_read_telegram_token || return 1
+    if ! printf '%s' "$TELEGRAM_BOT_TOKEN" | grep -Eq '^[0-9]{1,20}:[A-Za-z0-9_-]{16,235}$'; then
+      printf '%s\n' 'Некорректный токен Telegram-бота.' >&2; return 1
+    fi
+    if [ "$personal_platform" = Darwin ]; then
+      damir_telegram_keychain store >/dev/null 2>&1 || { printf '%s\n' 'Не удалось сохранить токен в Связке ключей.' >&2; return 1; }
+    elif command -v secret-tool >/dev/null 2>&1; then
+      printf '%s' "$TELEGRAM_BOT_TOKEN" | secret-tool store --label='Дамир: Telegram' service damir-telegram account "$telegram_keychain_account" || return 1
+    else
+      printf '%s\n' 'Системное хранилище secret-tool не найдено. Токен действует до закрытия Дамира; при следующем запуске потребуется ввести его снова.' >&2
+    fi
+  fi
+  export TELEGRAM_BOT_TOKEN
+}
+
 damir_read_telegram_token() {
   if [ ! -t 0 ]; then
-    printf '%s\n' 'Задай TELEGRAM_BOT_TOKEN и TELEGRAM_ALLOWED_USER_IDS или запусти из терминала.' >&2
+    printf '%s\n' 'Задай TELEGRAM_BOT_TOKEN или запусти из терминала для скрытого ввода токена.' >&2
     return 1
   fi
   printf '%s' 'Токен Telegram-бота от BotFather (ввод скрыт): '
@@ -35,11 +65,11 @@ damir_configure_telegram() {
     '') ;;
     --configure|-ConfigureTelegram)
       if [ "$telegram_command" != telegram ]; then
-        printf '%s\n' 'Для изменения настроек используй damir telegram --configure.' >&2
+        printf '%s\n' 'Для изменения настроек используй damir telegram-isolated --configure.' >&2
         return 1
       fi
       configure_telegram=1 ;;
-    *) printf '%s\n' 'Использование: damir telegram [--configure]' >&2; return 1 ;;
+    *) printf '%s\n' 'Использование: damir telegram-isolated [--configure]' >&2; return 1 ;;
   esac
   telegram_platform=$(uname -s)
   save_telegram_token=0
@@ -53,7 +83,7 @@ damir_configure_telegram() {
       TELEGRAM_BOT_TOKEN=$(printf '%s\n' "$telegram_credentials" | sed -n 's/^password=//p')
       telegram_credentials=
     else
-      printf '%s\n' 'Не удалось прочитать токен из Связки ключей. Проверь доступ к ней или выполни damir telegram --configure.' >&2
+      printf '%s\n' 'Не удалось прочитать токен из Связки ключей. Проверь доступ к ней или выполни damir telegram-isolated --configure.' >&2
       return 1
     fi
   fi
@@ -62,7 +92,7 @@ damir_configure_telegram() {
     if [ "$telegram_platform" = Darwin ] && [ "$telegram_command" = telegram ]; then save_telegram_token=1; fi
   fi
   if ! printf '%s' "$TELEGRAM_BOT_TOKEN" | grep -Eq '^[0-9]{1,20}:[A-Za-z0-9_-]{16,235}$'; then
-    printf '%s\n' 'Некорректный токен Telegram-бота. Для смены сохранённого токена: damir telegram --configure.' >&2
+    printf '%s\n' 'Некорректный токен Telegram-бота. Для смены сохранённого токена: damir telegram-isolated --configure.' >&2
     return 1
   fi
   telegram_bot_number=$(printf '%s' "$TELEGRAM_BOT_TOKEN" | cut -d: -f1 | sed 's/^0*//')
@@ -94,7 +124,7 @@ damir_configure_telegram() {
   fi
   if [ "$save_telegram_token" = 1 ]; then
     if ! damir_telegram_keychain store >/dev/null 2>&1; then
-      printf '%s\n' 'Не удалось сохранить токен в Связке ключей. Проверь доступ к ней и повтори damir telegram --configure.' >&2
+      printf '%s\n' 'Не удалось сохранить токен в Связке ключей. Проверь доступ к ней и повтори damir telegram-isolated --configure.' >&2
       return 1
     fi
   fi

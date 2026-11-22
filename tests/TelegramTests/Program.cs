@@ -71,6 +71,8 @@ try
     telegramStub.RateLimit = true;
     try { await api.SendAsync(options.AllowedUserId, "test", default); throw new Exception("Expected rate limit"); }
     catch (TelegramException e) { Check(!e.Fatal && e.RetryAfter == 5 && !e.Message.Contains(options.Token), "rate limit preserves retry_after without exposing token"); }
+    try { await api.SendDocumentAsync(options.AllowedUserId, "synthetic.txt", [1, 2, 3], default); throw new Exception("Expected upload rate limit"); }
+    catch (TelegramException e) { Check(!e.Fatal && e.RetryAfter == 5 && !e.Message.Contains(options.Token), "file uploads preserve retry_after without exposing the token"); }
     telegramStub.RateLimit = false; telegramStub.Webhook = true;
     try { await api.EnsurePollingAsync(default); throw new Exception("Expected webhook refusal"); }
     catch (TelegramException e) { Check(e.Fatal && !e.Message.Contains("synthetic-webhook"), "existing webhook is not overwritten or logged"); }
@@ -120,6 +122,7 @@ sealed class TelegramStub : HttpMessageHandler
         if (RateLimit) return Response("{\"ok\":false,\"parameters\":{\"retry_after\":5},\"description\":\"secret-response\"}", HttpStatusCode.TooManyRequests);
         if (method == "getMe") return Response("{\"ok\":true,\"result\":{\"id\":123456,\"is_bot\":true,\"username\":\"synthetic_bot\"}}");
         if (method == "getWebhookInfo") return Response(JsonSerializer.Serialize(new { ok = true, result = new { url = Webhook ? "https://synthetic-webhook/secret" : "" } }));
+        if (method == "setMyCommands") return Response("{\"ok\":true,\"result\":true}");
         if (method == "getUpdates")
         {
             using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(ct));

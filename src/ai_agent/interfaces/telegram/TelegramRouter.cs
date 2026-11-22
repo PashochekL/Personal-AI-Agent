@@ -9,7 +9,7 @@ public sealed record TelegramBackendProfile(long UserId, string Url, string ApiK
     public static TelegramBackendProfile[] Load(string path, TelegramOptions root)
     {
         if (!File.Exists(path))
-            throw new ArgumentException("Не найден файл изолированных серверов Telegram. Останови прежний запуск и снова выполни damir telegram через актуальный launcher.");
+            throw new ArgumentException("Не найден файл изолированных серверов Telegram. Останови прежний запуск и снова выполни damir telegram-isolated через актуальный launcher.");
         var json = new JsonSerializerOptions(JsonSerializerDefaults.Web) { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
             UnmappedMemberHandling = System.Text.Json.Serialization.JsonUnmappedMemberHandling.Disallow };
         return Validate(JsonSerializer.Deserialize<TelegramBackendProfile[]>(File.ReadAllText(path), json) ?? [], root);
@@ -95,6 +95,7 @@ public sealed class TelegramRouter : IDisposable
         var identity = await _telegram.IdentityAsync(ct);
         if (!identity.IsBot || identity.Id != _options.BotId) throw new TelegramException("Токен не соответствует боту.", true);
         await _telegram.EnsurePollingAsync(ct);
+        await _telegram.SetSimpleCommandsAsync(ct);
         foreach (var account in _accounts.Values)
         {
             var serverIdentity = await account.Backend.IdentityAsync(ct);

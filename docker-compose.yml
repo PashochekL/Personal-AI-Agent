@@ -49,6 +49,7 @@ services:
       DAMIR_MEMORY_ENABLED: ${DAMIR_MEMORY_ENABLED:-1}
       DAMIR_MEMORY_OWNER: ${DAMIR_MEMORY_OWNER:-local}
       DAMIR_MEMORY_PROJECT: ${DAMIR_MEMORY_PROJECT:-}
+      DAMIR_WORKSPACE_LABEL: ${DAMIR_WORKSPACE_LABEL:-текущий проект}
       DAMIR_EMBEDDING_DEPLOYMENT: ${DAMIR_EMBEDDING_DEPLOYMENT:-damir-memory-embedding}
       DAMIR_EMBEDDING_MODEL: ${DAMIR_EMBEDDING_MODEL:-ollama/embeddinggemma:300m}
       DAMIR_EMBEDDING_DIMENSIONS: ${DAMIR_EMBEDDING_DIMENSIONS:-768}
@@ -79,16 +80,18 @@ services:
       DAMIR_BACKEND_URL: ${DAMIR_CLI_BACKEND_URL:-http://backend:8080}
       DAMIR_BACKEND_API_KEY: ${DAMIR_BACKEND_API_KEY:-}
       DAMIR_SESSION_ID: ${DAMIR_SESSION_ID:-local}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      DAMIR_TELEGRAM_AUTO_OPEN: ${DAMIR_TELEGRAM_AUTO_OPEN:-0}
     read_only: true
     tmpfs: ["/tmp:rw,noexec,nosuid,size=16m"]
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     pids_limit: 64
-    mem_limit: 128m
+    mem_limit: 256m
     cpus: 0.5
     stdin_open: true
     tty: true
-    networks: [agent_internal]
+    networks: [agent_internal, telegram_egress]
   telegram:
     profiles: [telegram]
     build:

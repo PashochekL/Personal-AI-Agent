@@ -27,6 +27,7 @@ public sealed partial class CoreAgentFactory : IBackendAgentFactory, IAsyncDispo
     private readonly Uri _gateway;
     private readonly string _key;
     private readonly ConsoleUsageStore _usage;
+    private readonly PostgresTaskStore _tasks;
     private McpTools? _github;
 
     public CoreAgentFactory(PostgresContextStore history, BackendOptions options, NpgsqlDataSource database)
@@ -39,6 +40,7 @@ public sealed partial class CoreAgentFactory : IBackendAgentFactory, IAsyncDispo
         _defaultModel = Environment.GetEnvironmentVariable("DEFAULT_MODEL") ?? "gpt-6.1-sol";
         _llm = new LiteLlmClient(_http, gateway, key, _defaultModel);
         _usage = new ConsoleUsageStore(database);
+        _tasks = new PostgresTaskStore(database, options);
         _budget = Environment.GetEnvironmentVariable("DAMIR_CONTEXT_TOKENS") is { Length: > 0 } budget ? int.Parse(budget) : null;
         if (_budget is < 4096) throw new ArgumentException("Context budget must be at least 4096");
         _personality = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "damir-persona.txt"));

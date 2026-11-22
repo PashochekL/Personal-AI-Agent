@@ -1,12 +1,12 @@
-﻿#requires -Version 7.0
+#requires -Version 7.0
 param(
-    [ValidateSet('auth-check', 'login', 'run', 'backend', 'telegram', 'telegram-drain')]
+    [ValidateSet('auth-check', 'login', 'run', 'backend', 'telegram', 'telegram-isolated', 'telegram-drain')]
     [string] $Command = 'run',
     [switch] $ConfigureTelegram
 )
 
 $ErrorActionPreference = 'Stop'
-if ($ConfigureTelegram -and $Command -ne 'telegram') {
+if ($ConfigureTelegram -and $Command -notin 'telegram', 'telegram-isolated') {
     throw 'Для изменения настроек используй damir telegram -ConfigureTelegram.'
 }
 $projectDir = $PSScriptRoot
@@ -14,11 +14,21 @@ $invocationDir = (Get-Location).ProviderPath
 $changedEnvironment = @('DAMIR_CLI_BACKEND_URL', 'DAMIR_BACKEND_API_KEY', 'DAMIR_TIMEZONE', 'DAMIR_GATEWAY_CONFIG_REV', 'LITELLM_MASTER_KEY', 'DAMIR_POSTGRES_PASSWORD', 'DAMIR_WORKSPACE', 'DAMIR_SESSION_ID', 'DAMIR_MEMORY_PROJECT', 'DAMIR_SANDBOX_VOLUME', 'DAMIR_MCP_VOLUME', 'DAMIR_GITHUB_MCP', 'DAMIR_GITHUB_TOKEN', 'GCM_CREDENTIAL_STORE', 'GCM_INTERACTIVE', 'COMPOSE_PROGRESS', 'COMPOSE_IGNORE_ORPHANS')
 $previousEnvironment = @{}
 $changedEnvironment += @('TELEGRAM_BOT_TOKEN', 'TELEGRAM_ALLOWED_USER_ID', 'TELEGRAM_ALLOWED_USER_IDS')
+$changedEnvironment += 'DAMIR_TELEGRAM_AUTO_OPEN'
+$changedEnvironment += 'DAMIR_WORKSPACE_LABEL'
 foreach ($name in $changedEnvironment) {
     $previousEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
 }
+$personalTelegram = $Command -eq 'telegram'
+if ($personalTelegram) { $Command = 'run'; $env:DAMIR_TELEGRAM_AUTO_OPEN = '1' }
 Push-Location -LiteralPath $projectDir
 try {
+    if ($Command -in 'run', 'backend') {
+        $launchPath = [IO.Path]::GetFullPath($invocationDir).TrimEnd([IO.Path]::DirectorySeparatorChar)
+        $homePath = [IO.Path]::GetFullPath([Environment]::GetFolderPath('UserProfile')).TrimEnd([IO.Path]::DirectorySeparatorChar)
+        $rootPath = [IO.Path]::GetPathRoot($invocationDir).TrimEnd([IO.Path]::DirectorySeparatorChar)
+        if ($launchPath -eq $homePath -or $launchPath -eq $rootPath) { throw 'Открой папку конкретного проекта и запусти Дамира там. Домашнюю папку и корень диска подключать нельзя: это откроет доступ к личным файлам.' }
+    }
     if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
         throw 'Docker Desktop и Docker Compose не найдены.'
     }
@@ -38,6 +48,37 @@ try {
     $env:DAMIR_GATEWAY_CONFIG_REV = (Get-FileHash -LiteralPath (Join-Path $projectDir 'config/litellm.yaml') -Algorithm SHA256).Hash
     $stateDir = Join-Path $projectDir '.uv-cache'
     [IO.Directory]::CreateDirectory($stateDir) | Out-Null
+
+    function Initialize-DamirPersonalTelegram([switch] $Prompt, [switch] $Replace) {
+        if (-not $Replace -and -not [string]::IsNullOrWhiteSpace($env:TELEGRAM_BOT_TOKEN)) { return }
+        $settingsDir = if ($env:DAMIR_SETTINGS_DIR) { $env:DAMIR_SETTINGS_DIR } else { Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Damir' }
+        $tokenPath = Join-Path $settingsDir 'telegram-token.dpapi'
+        $legacyTokenPath = Join-Path $stateDir 'telegram-token.dpapi'
+        $readPath = if ([IO.File]::Exists($tokenPath)) { $tokenPath } else { $legacyTokenPath }
+        $secret = $null
+        try {
+            if (-not $Replace -and $IsWindows -and [IO.File]::Exists($readPath)) {
+                try { $secret = ConvertTo-SecureString ([IO.File]::ReadAllText($readPath).Trim()) -ErrorAction Stop }
+                catch {
+                    if (-not $Prompt) { [Console]::Error.WriteLine('Не удалось прочитать настройку Telegram. Введи /tg, чтобы настроить заново.'); return }
+                }
+            }
+            if ($null -eq $secret -and $Prompt) {
+                Write-Host 'Открой https://t.me/BotFather, создай своего бота и скопируй его токен. Это нужно только один раз; Telegram ID вводить не надо.'
+                $secret = Read-Host 'Токен твоего бота (ввод скрыт)' -AsSecureString
+            }
+            if ($null -eq $secret) { return }
+            $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secret)
+            try { $env:TELEGRAM_BOT_TOKEN = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr) }
+            finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr) }
+            if ($env:TELEGRAM_BOT_TOKEN -notmatch '^[0-9]{1,20}:[A-Za-z0-9_-]{16,235}$') { $env:TELEGRAM_BOT_TOKEN = ''; throw 'Некорректный токен Telegram-бота.' }
+            if ($IsWindows -and ($Prompt -or $readPath -eq $legacyTokenPath)) {
+                [IO.Directory]::CreateDirectory($settingsDir) | Out-Null
+                [IO.File]::WriteAllText($tokenPath, (ConvertFrom-SecureString $secret), [Text.UTF8Encoding]::new($false))
+            }
+        } finally { if ($null -ne $secret) { $secret.Dispose() } }
+    }
+
 
     function Get-DamirSecret([string] $path, [string] $prefix) {
         if (-not [IO.File]::Exists($path)) {
@@ -74,8 +115,12 @@ try {
             & docker compose run --rm --no-deps --entrypoint python gateway -u -c "from litellm.llms.chatgpt.authenticator import Authenticator; Authenticator().get_access_token(); print('Вход завершён. Сессия сохранена в отдельном томе Дамира.')"
             exit $LASTEXITCODE
         }
-        { $_ -in 'run', 'backend', 'telegram', 'telegram-drain' } {
-            if ($Command -in 'telegram', 'telegram-drain') {
+        { $_ -in 'run', 'backend', 'telegram-isolated', 'telegram-drain' } {
+            if ($Command -eq 'run') {
+                if ($personalTelegram) { Initialize-DamirPersonalTelegram -Prompt -Replace:$ConfigureTelegram }
+                else { Initialize-DamirPersonalTelegram }
+            }
+            if ($Command -in 'telegram-isolated', 'telegram-drain') {
                 $telegramTokenFile = Join-Path $stateDir 'telegram-token.dpapi'
                 $encryptedTelegramToken = $null
                 if ($ConfigureTelegram -or [string]::IsNullOrWhiteSpace($env:TELEGRAM_BOT_TOKEN)) {
@@ -83,12 +128,12 @@ try {
                     try {
                         if (-not $ConfigureTelegram -and $IsWindows -and [IO.File]::Exists($telegramTokenFile)) {
                             try { $secret = ConvertTo-SecureString ([IO.File]::ReadAllText($telegramTokenFile).Trim()) -ErrorAction Stop }
-                            catch { throw 'Не удалось расшифровать сохранённый токен. Выполни damir telegram -ConfigureTelegram.' }
+                            catch { throw 'Не удалось расшифровать сохранённый токен. Выполни damir telegram-isolated -ConfigureTelegram.' }
                         } else {
                             $secret = Read-Host 'Токен Telegram-бота от BotFather (ввод скрыт)' -AsSecureString
                             # Without a key PowerShell uses Windows DPAPI, bound to this user and machine.
                             # On other platforms ConvertFrom-SecureString would not encrypt the token.
-                            if ($IsWindows -and $Command -eq 'telegram') { $encryptedTelegramToken = ConvertFrom-SecureString $secret }
+                            if ($IsWindows -and $Command -eq 'telegram-isolated') { $encryptedTelegramToken = ConvertFrom-SecureString $secret }
                         }
                         $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secret)
                         try { $env:TELEGRAM_BOT_TOKEN = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr) }
@@ -100,7 +145,7 @@ try {
                 $usersFile = Join-Path $stateDir "telegram-users-$telegramBotNumber.txt"
                 $rawIds = if (-not [string]::IsNullOrWhiteSpace($env:TELEGRAM_ALLOWED_USER_IDS)) { $env:TELEGRAM_ALLOWED_USER_IDS } else { $env:TELEGRAM_ALLOWED_USER_ID }
                 if ($ConfigureTelegram -or [string]::IsNullOrWhiteSpace($rawIds)) {
-                    $savedIds = if ($Command -eq 'telegram' -and [IO.File]::Exists($usersFile)) { [IO.File]::ReadAllText($usersFile).Trim() } else { '' }
+                    $savedIds = if ($Command -eq 'telegram-isolated' -and [IO.File]::Exists($usersFile)) { [IO.File]::ReadAllText($usersFile).Trim() } else { '' }
                     if (-not $ConfigureTelegram -and -not [string]::IsNullOrWhiteSpace($savedIds)) {
                         $rawIds = $savedIds
                     } else {
@@ -118,33 +163,34 @@ try {
                 $env:TELEGRAM_ALLOWED_USER_IDS = $ids -join ','
                 $env:TELEGRAM_ALLOWED_USER_ID = if ($ids.Count -eq 1) { $ids[0].ToString() } else { '' }
                 if ($Command -eq 'telegram-drain' -and $ids.Count -ne 1) { throw 'Для старых отправок укажи один прежний ID.' }
-                if ($Command -eq 'telegram') { [IO.File]::WriteAllText($usersFile, $env:TELEGRAM_ALLOWED_USER_IDS + "`n", [Text.UTF8Encoding]::new($false)) }
+                if ($Command -eq 'telegram-isolated') { [IO.File]::WriteAllText($usersFile, $env:TELEGRAM_ALLOWED_USER_IDS + "`n", [Text.UTF8Encoding]::new($false)) }
                 if ($null -ne $encryptedTelegramToken) {
                     [IO.File]::WriteAllText($telegramTokenFile, $encryptedTelegramToken, [Text.UTF8Encoding]::new($false))
                 }
             }
             $env:COMPOSE_PROGRESS = 'quiet'
             $env:COMPOSE_IGNORE_ORPHANS = 'true'
-            if ([string]::Equals($invocationDir.TrimEnd([IO.Path]::DirectorySeparatorChar), $projectDir.TrimEnd([IO.Path]::DirectorySeparatorChar), [StringComparison]::OrdinalIgnoreCase)) {
+            $env:DAMIR_WORKSPACE = $invocationDir
+            # Preserve the original account scope for existing administrative Telegram deployments.
+            if ($Command -in 'telegram-isolated', 'telegram-drain' -and [string]::Equals($invocationDir, $projectDir, [StringComparison]::OrdinalIgnoreCase)) {
                 $env:DAMIR_WORKSPACE = Join-Path $projectDir 'workspace'
                 [IO.Directory]::CreateDirectory($env:DAMIR_WORKSPACE) | Out-Null
                 if ([string]::IsNullOrWhiteSpace($env:DAMIR_SESSION_ID)) { $env:DAMIR_SESSION_ID = 'local' }
-            } else {
-                $env:DAMIR_WORKSPACE = $invocationDir
-                if ([string]::IsNullOrWhiteSpace($env:DAMIR_SESSION_ID)) {
-                    $hash = [Security.Cryptography.SHA256]::Create()
-                    try { $bytes = $hash.ComputeHash([Text.Encoding]::UTF8.GetBytes($invocationDir)) } finally { $hash.Dispose() }
-                    $env:DAMIR_SESSION_ID = 'workspace-' + [BitConverter]::ToString($bytes).Replace('-', '').ToLowerInvariant()
-                }
+            }
+            if ([string]::IsNullOrWhiteSpace($env:DAMIR_SESSION_ID)) {
+                $hash = [Security.Cryptography.SHA256]::Create()
+                try { $bytes = $hash.ComputeHash([Text.Encoding]::UTF8.GetBytes($env:DAMIR_WORKSPACE)) } finally { $hash.Dispose() }
+                $env:DAMIR_SESSION_ID = 'workspace-' + [BitConverter]::ToString($bytes).Replace('-', '').ToLowerInvariant()
             }
             $env:DAMIR_SANDBOX_VOLUME = 'damir-ipc-' + [Guid]::NewGuid().ToString('N')
+            $env:DAMIR_WORKSPACE_LABEL = [IO.Path]::GetFileName($env:DAMIR_WORKSPACE.TrimEnd([IO.Path]::DirectorySeparatorChar))
             if ([string]::IsNullOrWhiteSpace($env:DAMIR_MEMORY_PROJECT)) {
                 $memoryHash = [Security.Cryptography.SHA256]::Create()
                 try { $memoryBytes = $memoryHash.ComputeHash([Text.Encoding]::UTF8.GetBytes($env:DAMIR_WORKSPACE)) } finally { $memoryHash.Dispose() }
                 $env:DAMIR_MEMORY_PROJECT = 'workspace-' + [BitConverter]::ToString($memoryBytes).Replace('-', '').ToLowerInvariant()
             }
             $env:DAMIR_MCP_VOLUME = 'damir-mcp-' + [Guid]::NewGuid().ToString('N')
-            if ($Command -ne 'telegram' -and [string]::IsNullOrWhiteSpace($env:DAMIR_GITHUB_TOKEN)) {
+            if ($Command -ne 'telegram-isolated' -and [string]::IsNullOrWhiteSpace($env:DAMIR_GITHUB_TOKEN)) {
                 try {
                     $saved = $githubKey | & git credential-manager get 2>$null
                     if ($LASTEXITCODE -eq 0) {
@@ -176,7 +222,7 @@ try {
                         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
                     }
                 }
-                if ($Command -eq 'telegram') {
+                if ($Command -eq 'telegram-isolated') {
                     . (Join-Path $projectDir 'scripts/telegram-isolated.ps1')
                     $telegramExit = Invoke-DamirIsolatedTelegram -StateRoot $stateDir
                     exit $telegramExit
@@ -211,6 +257,11 @@ try {
                     & docker stop --time 40 $backendId 2>$null | Out-Null
                     if ($LASTEXITCODE -ne 0) { throw 'Не удалось остановить backend.' }
                     $backendId = $null
+                    if ($agentExit -eq 73) {
+                        Initialize-DamirPersonalTelegram -Prompt
+                        $env:DAMIR_TELEGRAM_AUTO_OPEN = '1'
+                        continue
+                    }
                     if ($agentExit -eq 71) {
                         $secret = Read-Host 'Вставь personal access token GitHub (ввод скрыт)' -AsSecureString
                         $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secret)

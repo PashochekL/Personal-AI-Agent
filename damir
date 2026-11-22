@@ -1,6 +1,27 @@
 #!/bin/sh
 set -eu
 invocation_dir=$(pwd -P)
+personal_telegram=0
+personal_configure=0
+if [ "${1:-run}" = telegram ]; then
+  if [ "$#" -gt 2 ]; then printf '%s\n' 'Использование: damir telegram [--configure]' >&2; exit 2; fi
+  case "${2:-}" in
+    '') ;;
+    --configure|-ConfigureTelegram) personal_configure=1 ;;
+    *) printf '%s\n' 'Использование: damir telegram [--configure]' >&2; exit 2 ;;
+  esac
+  personal_telegram=1
+  DAMIR_TELEGRAM_AUTO_OPEN=1
+  export DAMIR_TELEGRAM_AUTO_OPEN
+  set -- run
+fi
+case "${1:-run}" in
+  run|backend)
+    if [ "$invocation_dir" = / ] || [ "$invocation_dir" = "${HOME:-}" ]; then
+      printf '%s\n' 'Открой папку конкретного проекта и запусти Дамира там. Домашнюю папку и корень диска подключать нельзя: это откроет доступ к личным файлам.' >&2
+      exit 1
+    fi ;;
+esac
 script_path=$0
 link_depth=0
 while [ -L "$script_path" ]; do
@@ -44,25 +65,38 @@ case "${1:-run}" in
     docker compose run --rm --no-deps --user 0 --entrypoint python gateway -c 'import os; os.chown("/tokens/chatgpt", 65532, 65532); os.chmod("/tokens/chatgpt", 0o700)'
     exec docker compose run --rm --no-deps --entrypoint python gateway -u -c 'from litellm.llms.chatgpt.authenticator import Authenticator; Authenticator().get_access_token(); print("Вход завершён. Сессия сохранена в отдельном томе Дамира.")'
     ;;
-  run|backend|telegram|telegram-drain)
-    if [ "${1:-run}" = telegram ] || [ "${1:-run}" = telegram-drain ]; then
-      if [ "$#" -gt 2 ]; then printf '%s\n' 'Использование: damir telegram [--configure]' >&2; exit 2; fi
+  run|backend|telegram-isolated|telegram-drain)
+    if [ "${1:-run}" = run ] && [ -f "$project_dir/scripts/telegram-settings.sh" ]; then
       . "$project_dir/scripts/telegram-settings.sh"
-      damir_configure_telegram "$1" "${2:-}"
+      if [ "$personal_configure" = 1 ]; then
+        TELEGRAM_BOT_TOKEN=
+        damir_personal_telegram replace
+      elif [ "$personal_telegram" = 1 ]; then damir_personal_telegram setup
+      else damir_personal_telegram load; fi
+    fi
+    if [ "${1:-run}" = telegram-isolated ] || [ "${1:-run}" = telegram-drain ]; then
+      if [ "$#" -gt 2 ]; then printf '%s\n' 'Использование: damir telegram-isolated [--configure]' >&2; exit 2; fi
+      . "$project_dir/scripts/telegram-settings.sh"
+      if [ "$1" = telegram-isolated ]; then damir_configure_telegram telegram "${2:-}"
+      else damir_configure_telegram "$1" "${2:-}"; fi
     fi
     COMPOSE_PROGRESS=quiet
     COMPOSE_IGNORE_ORPHANS=true
     export COMPOSE_PROGRESS COMPOSE_IGNORE_ORPHANS
-    if [ "$invocation_dir" = "$project_dir" ]; then
-      DAMIR_WORKSPACE="$project_dir/workspace"
-      mkdir -p "$DAMIR_WORKSPACE"
-      DAMIR_SESSION_ID=${DAMIR_SESSION_ID:-local}
-    else
-      DAMIR_WORKSPACE="$invocation_dir"
-      workspace_hash=$(printf '%s' "$DAMIR_WORKSPACE" | openssl dgst -sha256 | awk '{print $NF}')
-      DAMIR_SESSION_ID=${DAMIR_SESSION_ID:-"workspace-$workspace_hash"}
-    fi
+    DAMIR_WORKSPACE="$invocation_dir"
+    case "${1:-run}" in
+      telegram-isolated|telegram-drain)
+        if [ "$invocation_dir" = "$project_dir" ]; then
+          DAMIR_WORKSPACE="$project_dir/workspace"
+          mkdir -p "$DAMIR_WORKSPACE"
+          DAMIR_SESSION_ID=${DAMIR_SESSION_ID:-local}
+        fi ;;
+    esac
+    workspace_hash=$(printf '%s' "$DAMIR_WORKSPACE" | openssl dgst -sha256 | awk '{print $NF}')
+    DAMIR_SESSION_ID=${DAMIR_SESSION_ID:-"workspace-$workspace_hash"}
     export DAMIR_WORKSPACE DAMIR_SESSION_ID
+    DAMIR_WORKSPACE_LABEL=$(basename "$DAMIR_WORKSPACE")
+    export DAMIR_WORKSPACE_LABEL
     # Memory belongs to a project, not to an individual conversation.
     memory_project_hash=$(printf '%s' "$DAMIR_WORKSPACE" | openssl dgst -sha256 | awk '{print $NF}')
     DAMIR_MEMORY_PROJECT=${DAMIR_MEMORY_PROJECT:-"workspace-$memory_project_hash"}
@@ -77,7 +111,7 @@ case "${1:-run}" in
       git credential-osxkeychain "$1"
     }
     github_key() { printf 'protocol=https\nhost=damir-github.local\nusername=damir\n\n'; }
-    if [ "${1:-run}" != telegram ] && [ -z "${DAMIR_GITHUB_TOKEN:-}" ] && [ "$(uname -s)" = Darwin ]; then
+    if [ "${1:-run}" != telegram-isolated ] && [ -z "${DAMIR_GITHUB_TOKEN:-}" ] && [ "$(uname -s)" = Darwin ]; then
       DAMIR_GITHUB_TOKEN=$(github_key | github_credentials get 2>/dev/null | sed -n 's/^password=//p')
     fi
     DAMIR_GITHUB_MCP=0
@@ -111,7 +145,7 @@ case "${1:-run}" in
         docker compose exec -T embeddings ollama pull embeddinggemma:300m
       fi
     fi
-    if [ "${1:-run}" = telegram ]; then
+    if [ "${1:-run}" = telegram-isolated ]; then
       if sh scripts/telegram-isolated.sh; then exit 0; else exit $?; fi
     fi
     docker compose build shell-sandbox
@@ -137,6 +171,12 @@ case "${1:-run}" in
       docker stop --time 40 "$backend_id" >/dev/null
       backend_id=
       case "$result" in
+        73)
+          . "$project_dir/scripts/telegram-settings.sh"
+          damir_personal_telegram setup
+          DAMIR_TELEGRAM_AUTO_OPEN=1
+          export DAMIR_TELEGRAM_AUTO_OPEN
+          ;;
         71)
           if [ "$(uname -s)" != Darwin ]; then
             printf '%s\n' 'Вход в этом скрипте доступен на macOS; на Windows используй damir.cmd.' >&2
@@ -181,7 +221,7 @@ case "${1:-run}" in
     done
     ;;
   *)
-    printf '%s\n' 'Использование: damir [login|auth-check|run|backend|telegram|telegram-drain]' >&2
+    printf '%s\n' 'Использование: damir [login|auth-check|run|backend|telegram|telegram-isolated|telegram-drain]' >&2
     exit 2
     ;;
 esac
