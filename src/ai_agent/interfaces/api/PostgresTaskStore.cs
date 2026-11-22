@@ -1,4 +1,5 @@
 using AiAgent.Shared;
+using AiAgent.Observability;
 using Npgsql;
 using System.Text.Json;
 using TaskStatus = AiAgent.Shared.TaskStatus;
@@ -37,6 +38,7 @@ public sealed partial class PostgresTaskStore(NpgsqlDataSource database, Backend
             ALTER TABLE damir_api_sessions ADD COLUMN IF NOT EXISTS client_name text;
             CREATE UNIQUE INDEX IF NOT EXISTS damir_api_named_session ON damir_api_sessions(owner_id,project_id,client_name);
             ALTER TABLE damir_api_tasks ADD COLUMN IF NOT EXISTS selection text NOT NULL DEFAULT '{}';
+            ALTER TABLE damir_api_tasks ADD COLUMN IF NOT EXISTS traceparent varchar(55);
             ALTER TABLE damir_api_sessions ADD COLUMN IF NOT EXISTS input_channel text NOT NULL DEFAULT 'console';
             CREATE TABLE IF NOT EXISTS damir_telegram_companion (
                 bot_id bigint PRIMARY KEY, owner_id text NOT NULL, project_id text NOT NULL,
@@ -172,15 +174,23 @@ public sealed partial class PostgresTaskStore(NpgsqlDataSource database, Backend
             if ((long)(await count.ExecuteScalarAsync(ct))! >= 100) throw new TaskAdmissionException(429, "Session queue is full.");
         }
         var task = new AgentTask { TaskId = Guid.NewGuid().ToString("N"), SessionId = request.SessionId, UserMessage = request.UserMessage };
-        await using (var insert = new NpgsqlCommand("INSERT INTO damir_api_tasks(task_id,session_id,user_message,status,request_key,selection) VALUES($1,$2,$3,'PENDING',$4,$5)", connection, transaction))
+        await using (var insert = new NpgsqlCommand("INSERT INTO damir_api_tasks(task_id,session_id,user_message,status,request_key,selection,traceparent) VALUES($1,$2,$3,'PENDING',$4,$5,$6)", connection, transaction))
         {
             insert.Parameters.AddWithValue(task.TaskId); insert.Parameters.AddWithValue(task.SessionId); insert.Parameters.AddWithValue(task.UserMessage);
             insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text, Value = (object?)requestKey ?? DBNull.Value });
             insert.Parameters.AddWithValue(JsonSerializer.Serialize(request.Selection));
+            insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text, Value = (object?)AgentTelemetry.CaptureTraceParent() ?? DBNull.Value });
             await insert.ExecuteNonQueryAsync(ct);
         }
         await transaction.CommitAsync(ct);
         return task;
+    }
+
+    public async Task<string?> TraceParentAsync(string taskId, CancellationToken ct)
+    {
+        await using var command = Scoped("SELECT t.traceparent FROM damir_api_tasks t JOIN damir_api_sessions s USING(session_id) WHERE s.owner_id=$1 AND s.project_id=$2 AND t.task_id=$3");
+        command.Parameters.AddWithValue(taskId);
+        return await command.ExecuteScalarAsync(ct) as string;
     }
 
     public async Task<AgentTask?> CancelAsync(string id, CancellationToken ct = default)

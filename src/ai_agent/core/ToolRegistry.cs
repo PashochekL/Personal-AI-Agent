@@ -46,6 +46,7 @@ public sealed class ToolRegistry
     {
         cancellationToken.ThrowIfCancellationRequested();
         call.Validate();
+        using var observation = new CoreDiagnostics.ToolObservation(_tools.ContainsKey(call.Name) ? call.Name : null);
         if (!_tools.TryGetValue(call.Name, out var entry)) return Failure("Unknown tool");
         try
         {
@@ -59,9 +60,10 @@ public sealed class ToolRegistry
             try { _onExecute?.Invoke(call.Name); } catch (Exception) { /* Progress reporting must not affect tools. */ }
             var result = await entry.Tool.ExecuteAsync(call.Arguments, cancellationToken);
             result.Validate();
+            observation.Complete(result.Success);
             return result;
         }
-        catch (OperationCanceledException) { throw; }
+        catch (OperationCanceledException) { observation.Cancel(); throw; }
         catch (Exception) { return Failure("Tool execution failed"); }
     }
 

@@ -4,6 +4,9 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using AiAgent.Memory;
 using AiAgent.Shared;
+using AiAgent.Observability;
+using System.Diagnostics;
+using Microsoft.AspNetCore.Routing;
 using Microsoft.AspNetCore.Http.Features;
 using Npgsql;
 using StackExchange.Redis;
@@ -27,6 +30,10 @@ public static class BackendApplication
         builder.WebHost.ConfigureKestrel(server => server.Limits.MaxRequestBodySize = 131072);
         // Do not log URLs, bodies, connection strings, authentication headers or provider exceptions.
         builder.Logging.AddFilter("Microsoft.AspNetCore", LogLevel.Warning);
+        builder.Logging.AddFilter("Microsoft.Hosting.Lifetime", LogLevel.Warning);
+        builder.Logging.ClearProviders();
+        builder.Logging.AddJsonConsole(console => { console.IncludeScopes = true; console.UseUtcTimestamp = true; console.TimestampFormat = "O"; });
+        builder.Services.AddDamirTelemetry(ObservabilityOptions.FromEnvironment());
         builder.Services.AddSingleton(options);
         builder.Services.ConfigureHttpJsonOptions(json => json.SerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower);
         builder.Services.AddSingleton(_ => NpgsqlDataSource.Create(options.Database));
@@ -53,6 +60,20 @@ public static class BackendApplication
         catch { await app.DisposeAsync(); throw; }
 
         var keyHash = SHA256.HashData(Encoding.UTF8.GetBytes(options.ApiKey));
+        app.Use(async (context, next) =>
+        {
+            // Use route templates, never paths, query strings, headers or bodies.
+            using var activity = AgentTelemetry.Source.StartActivity("http.request", ActivityKind.Server);
+            activity?.SetTag("http.route", (context.GetEndpoint() as RouteEndpoint)?.RoutePattern.RawText ?? "unmatched");
+            activity?.SetTag("http.request.method", context.Request.Method is "GET" or "POST" ? context.Request.Method : "OTHER");
+            try { await next(context); }
+            catch { activity?.SetStatus(ActivityStatusCode.Error); throw; }
+            finally
+            {
+                activity?.SetTag("http.response.status_code", context.Response.StatusCode);
+                if (context.Response.StatusCode >= 500) activity?.SetStatus(ActivityStatusCode.Error);
+            }
+        });
         app.Use(async (context, next) =>
         {
             if (context.Request.Path != "/health/live")

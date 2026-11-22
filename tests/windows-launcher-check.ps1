@@ -14,6 +14,8 @@ $oldGithubToken = $env:DAMIR_GITHUB_TOKEN
 $oldTelegramToken = $env:TELEGRAM_BOT_TOKEN
 $oldTelegramUser = $env:TELEGRAM_ALLOWED_USER_ID
 $oldTelegramUsers = $env:TELEGRAM_ALLOWED_USER_IDS
+$oldObservability = $env:DAMIR_OBSERVABILITY_ENABLED
+$oldOtelEndpoint = $env:DAMIR_OTEL_ENDPOINT
 $oldSettingsDir = $env:DAMIR_SETTINGS_DIR
 $pwsh = (Get-Command pwsh -CommandType Application).Source | Select-Object -First 1
 try {
@@ -34,6 +36,7 @@ try {
     $env:DAMIR_MEMORY_ENABLED = '1'
     $env:DAMIR_GITHUB_TOKEN = ''
     $env:TELEGRAM_ALLOWED_USER_IDS = ''
+    $env:DAMIR_OBSERVABILITY_ENABLED = '0'
     $env:DAMIR_TIMEZONE = 'Asia/Tomsk'
     $env:DAMIR_SETTINGS_DIR = Join-Path $fixtureDir 'settings'
     if ($IsWindows) {
@@ -216,6 +219,12 @@ exit $LASTEXITCODE
     if ($calls.Count -ne 2 -or $calls[0] -notlike '*--user 0 --entrypoint python gateway*' -or $calls[1] -notlike '*Authenticator*') { throw 'Неверная последовательность входа.' }
     if ([IO.File]::ReadAllText((Join-Path $fixtureDir '.uv-cache/damir-gateway-key')).Trim() -ne $key) { throw 'Существующий ключ был изменён.' }
     [IO.File]::WriteAllText($env:DAMIR_TEST_LOG, '')
+    $env:DAMIR_OBSERVABILITY_ENABLED = '1'
+    $env:DAMIR_OTEL_ENDPOINT = 'http://otel-collector:4318'
+    $otelOutput = (& $pwsh -NoLogo -NoProfile -File $launcher run 2>&1 | Out-String)
+    if ($LASTEXITCODE -ne 0 -or -not [IO.File]::ReadAllText($env:DAMIR_TEST_LOG).Contains('compose --profile observability up -d otel-collector')) { throw 'Local telemetry collector was not started.' }
+    $env:DAMIR_OBSERVABILITY_ENABLED = '0'
+    [IO.File]::WriteAllText($env:DAMIR_TEST_LOG, '')
     $env:DAMIR_TEST_FAIL = '1'
     $null = & $pwsh -NoLogo -NoProfile -File $launcher run
     if ($LASTEXITCODE -ne 23 -or [IO.File]::ReadAllLines($env:DAMIR_TEST_LOG).Count -ne 3) { throw 'Ошибка Docker не остановила запуск.' }
@@ -257,6 +266,8 @@ exit $LASTEXITCODE
     $env:TELEGRAM_BOT_TOKEN = $oldTelegramToken
     $env:TELEGRAM_ALLOWED_USER_ID = $oldTelegramUser
     $env:TELEGRAM_ALLOWED_USER_IDS = $oldTelegramUsers
+    $env:DAMIR_OBSERVABILITY_ENABLED = $oldObservability
+    $env:DAMIR_OTEL_ENDPOINT = $oldOtelEndpoint
     $env:DAMIR_SETTINGS_DIR = $oldSettingsDir
     if ([IO.Directory]::Exists($fixtureDir)) { [IO.Directory]::Delete($fixtureDir, $true) }
 }

@@ -10,6 +10,7 @@
     <ProjectReference Include="../../core/Core.csproj" />
     <ProjectReference Include="../../gateway/Gateway.csproj" />
     <ProjectReference Include="../../memory/Memory.csproj" />
+    <ProjectReference Include="../../observability/Observability.csproj" />
     <Compile Include="../../sandbox/*.cs" Link="Sandbox/%(Filename)%(Extension)" />
     <Compile Include="../../tools/shell/*.cs" Link="Shell/%(Filename)%(Extension)" />
     <Compile Include="../../tools/web/*.cs" Link="Web/%(Filename)%(Extension)" />

@@ -170,8 +170,7 @@ try
     Check((await Wait(recovered, durable.TaskId)).Status == TaskStatus.COMPLETED && factory.Calls["redis-was-offline"] == 1, "pending task executes once after Redis reconnect");
 
     await app.StopAsync(); await app.DisposeAsync(); app = null;
-    count += await WorkspaceHandoffChecks.RunAsync(options);
-    count += await CompositionChecks.RunAsync(options);
+    count += await TelemetryChecks.RunAsync(options);
     Console.WriteLine($"Backend checks passed: {count}");
     return 0;
 }
