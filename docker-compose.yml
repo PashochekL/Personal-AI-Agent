@@ -40,6 +40,12 @@ services:
       DAMIR_GITHUB_MCP: ${DAMIR_GITHUB_MCP:-0}
       DAMIR_BACKEND_WORKERS: ${DAMIR_BACKEND_WORKERS:-2}
       DAMIR_TASK_TIMEOUT_SECONDS: ${DAMIR_TASK_TIMEOUT_SECONDS:-300}
+      DAMIR_OBSERVABILITY_ENABLED: ${DAMIR_OBSERVABILITY_ENABLED:-0}
+      DAMIR_OTEL_ENDPOINT: ${DAMIR_OTEL_ENDPOINT:-}
+      DAMIR_TRACE_SAMPLE_RATIO: ${DAMIR_TRACE_SAMPLE_RATIO:-1}
+      DAMIR_LANGFUSE_ENDPOINT: ${DAMIR_LANGFUSE_ENDPOINT:-}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
       REDIS_URL: redis:6379
       LITELLM_API_KEY: ${LITELLM_MASTER_KEY:?Set LITELLM_MASTER_KEY in .env}
       DEFAULT_MODEL: ${DEFAULT_MODEL:-gpt-6.1-sol}
@@ -71,6 +77,22 @@ services:
     cpus: 1.0
     stop_grace_period: 40s
     networks: [agent_internal, backend_http, search_internal]
+  otel-collector:
+    profiles: [observability]
+    image: otel/opentelemetry-collector:0.165.0@sha256:34b24b740c3c88d3467740e8642a397c13898ef76d7295c5425164c482ed1b73
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./config/otel-collector.yaml:/etc/otelcol/config.yaml:ro
+    networks: [agent_internal]
+    user: "65532:65532"
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=16m"]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    mem_limit: 128m
+    cpus: 0.5
+    restart: unless-stopped
   cli:
     profiles: [backend]
     build:

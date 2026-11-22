@@ -1,4 +1,4 @@
-#requires -Version 7.0
+﻿#requires -Version 7.0
 param(
     [ValidateSet('auth-check', 'login', 'run', 'backend', 'telegram', 'telegram-isolated', 'telegram-drain')]
     [string] $Command = 'run',
@@ -207,6 +207,10 @@ try {
             $githubId = $null
             $backendId = $null
             try {
+                if ($env:DAMIR_OBSERVABILITY_ENABLED -eq '1' -and $env:DAMIR_OTEL_ENDPOINT -and $env:DAMIR_OTEL_ENDPOINT.TrimEnd('/') -eq 'http://otel-collector:4318') {
+                    & docker compose --profile observability up -d otel-collector
+                    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                }
                 & docker compose build web-search
                 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
                 & docker compose up -d --wait gateway postgres web-search

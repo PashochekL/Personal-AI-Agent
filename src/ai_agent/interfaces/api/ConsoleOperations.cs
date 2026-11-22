@@ -4,6 +4,8 @@ using AiAgent.Core;
 using AiAgent.Gateway;
 using AiAgent.Sandbox;
 using AiAgent.Shared;
+using AiAgent.Observability;
+using System.Diagnostics;
 using AiAgent.Tools.FileSystem;
 using AiAgent.Tools.Shell;
 using AiAgent.Tools.Web;
@@ -41,8 +43,17 @@ public sealed partial class CoreAgentFactory
     // Worker holds the session lease for every operation, including context inspection and compression.
     public async Task<AgentResult> ExecuteAsync(AgentTask task, TaskSelection selection, CancellationToken ct)
     {
-        try { return await ExecuteCoreAsync(task, selection, ct); }
-        catch (ContextLimitException e) { return new AgentResult { SessionId = task.SessionId, Status = TaskStatus.FAILED, Error = e.Message }; }
+        using var activity = AgentTelemetry.Source.StartActivity("agent.run");
+        activity?.SetTag("langfuse.observation.type", "agent");
+        try
+        {
+            var result = await ExecuteCoreAsync(task, selection, ct);
+            if (result.Status == TaskStatus.FAILED) activity?.SetStatus(ActivityStatusCode.Error);
+            return result;
+        }
+        catch (ContextLimitException e) { activity?.SetStatus(ActivityStatusCode.Error); return new AgentResult { SessionId = task.SessionId, Status = TaskStatus.FAILED, Error = e.Message }; }
+        catch (OperationCanceledException) { activity?.SetTag("damir.cancelled", true); throw; }
+        catch { activity?.SetStatus(ActivityStatusCode.Error); throw; }
     }
 
     private async Task<AgentResult> ExecuteCoreAsync(AgentTask task, TaskSelection selection, CancellationToken ct)
@@ -72,7 +83,7 @@ public sealed partial class CoreAgentFactory
         if (sessionId is not null) tools.Register(new TelegramFileTool(Environment.GetEnvironmentVariable("AGENT_WORKSPACE") ?? "/workspace", sessionId, _tasks));
         _github?.Register(tools);
         var totals = new UsageTotals();
-        var tracked = new UsageTrackingClient(client, totals, sessionId is null ? null : (usage, token) => _usage.AddAsync(sessionId, usage, token));
+        var tracked = new UsageTrackingClient(new ObservedLlmClient(client, selection.Model ?? _defaultModel), totals, sessionId is null ? null : (usage, token) => _usage.AddAsync(sessionId, usage, token));
         var limit = await client.GetInputLimitAsync(ct);
         var (display, budget) = ModelContextPolicy.For(selection.Model ?? _defaultModel, limit, _budget);
         var agent = new Agent(tracked, _history, tools, workspace: _workspace, systemPrompt: _personality,

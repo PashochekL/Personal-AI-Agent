@@ -64,6 +64,7 @@ git switch --track -c develop origin/develop
    и `dotnet run --project tests/MemoryTests/MemoryTests.csproj`.
    HTTP-клиент проверяется командой `dotnet run --project tests/CliTests/CliTests.csproj`.
    Telegram-клиент: `dotnet run --project tests/TelegramTests/TelegramTests.csproj`.
+   Наблюдаемость и скрытие содержимого: `dotnet run --project tests/ObservabilityTests/ObservabilityTests.csproj`.
    Интеграция CLI и Telegram с backend: `pwsh -NoProfile -File tests/BackendTests/run-integration.ps1`.
    Изоляция файлов и shell аккаунтов в Docker: `pwsh -NoProfile -File tests/TelegramTests/run-isolation-smoke.ps1`.
    Полный автономный набор в Linux: `docker build -f docker/Dockerfile.tests -t personal-ai-agent-tests .`.

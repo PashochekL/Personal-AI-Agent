@@ -4,7 +4,7 @@ $repoDir = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
 $prefix = 'damir-backend-check-' + [Guid]::NewGuid().ToString('N').Substring(0, 12)
 $password = [Guid]::NewGuid().ToString('N')
 $containers = [Collections.Generic.List[string]]::new()
-$changed = @('DAMIR_BACKEND_TEST_DATABASE_URL', 'DAMIR_BACKEND_TEST_REDIS', 'DOTNET_CLI_HOME', 'NUGET_PACKAGES', 'DOTNET_CLI_TELEMETRY_OPTOUT')
+$changed = @('DAMIR_BACKEND_TEST_DATABASE_URL', 'DAMIR_BACKEND_TEST_REDIS', 'DOTNET_CLI_HOME', 'NUGET_PACKAGES', 'DOTNET_CLI_TELEMETRY_OPTOUT', 'DAMIR_OBSERVABILITY_ENABLED')
 $previous = @{}
 foreach ($name in $changed) { $previous[$name] = [Environment]::GetEnvironmentVariable($name, 'Process') }
 function Invoke-TestDocker([string[]] $Arguments) {
@@ -14,6 +14,7 @@ function Invoke-TestDocker([string[]] $Arguments) {
 }
 Push-Location -LiteralPath $repoDir
 try {
+    $env:DAMIR_OBSERVABILITY_ENABLED = '0'
     $dbName = "$prefix-db"; $redisName = "$prefix-redis"
     $containers.Add($dbName)
     $null = Invoke-TestDocker -Arguments @('run', '--rm', '-d', '--name', $dbName,

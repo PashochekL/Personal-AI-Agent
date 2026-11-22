@@ -28,6 +28,12 @@ if grep -q -- '--service-ports' "$TELEGRAM_LAUNCH_LOG"; then exit 1; fi
 if grep -q 'volume rm.*damir-tg-data\|volume rm.*damir_telegram_state' "$TELEGRAM_LAUNCH_LOG"; then exit 1; fi
 if grep -q "$TELEGRAM_BOT_TOKEN" "$fixture/output"; then exit 1; fi
 : > "$TELEGRAM_LAUNCH_LOG"
+DAMIR_OBSERVABILITY_ENABLED=1 DAMIR_OTEL_ENDPOINT=http://otel-collector:4318 sh ./damir telegram-isolated > "$fixture/output"
+grep -q 'compose --profile observability up -d otel-collector' "$TELEGRAM_LAUNCH_LOG"
+: > "$TELEGRAM_LAUNCH_LOG"
+DAMIR_OBSERVABILITY_ENABLED=1 DAMIR_OTEL_ENDPOINT= sh ./damir telegram-isolated > "$fixture/output"
+if grep -q 'otel-collector' "$TELEGRAM_LAUNCH_LOG"; then exit 1; fi
+: > "$TELEGRAM_LAUNCH_LOG"
 TELEGRAM_ALLOWED_USER_ID=invalid
 TELEGRAM_ALLOWED_USER_IDS='900001,invalid'
 export TELEGRAM_ALLOWED_USER_ID TELEGRAM_ALLOWED_USER_IDS

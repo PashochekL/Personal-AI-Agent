@@ -114,6 +114,9 @@ Telegram-чат сам к новому проекту не подключает�
 для нескольких изолированных пользователей описан отдельно
 в [TELEGRAM_ISOLATED.md](TELEGRAM_ISOLATED.md).
 
+Для диагностики можно включить OpenTelemetry и Langfuse по
+[OBSERVABILITY.md](OBSERVABILITY.md). Без явного включения телеметрия не экспортируется.
+
 Обычный `damir` использует общий HTTP backend с очередью. Команды, восстановление
 сессии и повторы описаны в [CLI.md](CLI.md). `damir backend` запускает backend
 отдельно с портом на loopback; API описан в [BACKEND.md](BACKEND.md).

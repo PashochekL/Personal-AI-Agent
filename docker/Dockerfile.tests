@@ -11,6 +11,7 @@ RUN dotnet run --project tests/CoreTests/CoreTests.csproj
 RUN dotnet run --project tests/MemoryTests/MemoryTests.csproj
 RUN dotnet run --project tests/CliTests/CliTests.csproj
 RUN dotnet run --project tests/TelegramTests/TelegramTests.csproj
+RUN dotnet run --project tests/ObservabilityTests/ObservabilityTests.csproj
 RUN sh tests/LaunchTests/memory-workspace.sh
 RUN sh tests/LaunchTests/github-auth.sh
 RUN sh tests/LaunchTests/telegram.sh

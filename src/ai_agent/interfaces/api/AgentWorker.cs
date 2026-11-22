@@ -1,4 +1,6 @@
 using AiAgent.Shared;
+using AiAgent.Observability;
+using System.Diagnostics;
 using Npgsql;
 using StackExchange.Redis;
 using TaskStatus = AiAgent.Shared.TaskStatus;
@@ -111,6 +113,9 @@ public sealed class AgentWorker(PostgresTaskStore store, RedisTaskQueue queue, I
 
     private async Task RunAsync(AgentTask task, NpgsqlConnection sessionLease, CancellationToken hostToken)
     {
+        using var activity = AgentTelemetry.StartTask(task.TaskId, task.SessionId, options.Scope, await store.TraceParentAsync(task.TaskId, hostToken));
+        var started = Stopwatch.GetTimestamp();
+        using var logScope = logger.BeginScope(new Dictionary<string, object?> { ["TraceId"] = activity?.TraceId.ToString(), ["SpanId"] = activity?.SpanId.ToString(), ["TaskId"] = task.TaskId });
         logger.LogInformation("Task {TaskId} running in session {SessionId}", task.TaskId, task.SessionId);
         using var timeout = new CancellationTokenSource(options.TaskTimeout);
         using var run = CancellationTokenSource.CreateLinkedTokenSource(hostToken, timeout.Token);
@@ -135,7 +140,8 @@ public sealed class AgentWorker(PostgresTaskStore store, RedisTaskQueue queue, I
         using var save = new CancellationTokenSource(TimeSpan.FromSeconds(5));
         try { await store.FinishAsync(task, result, save.Token); }
         catch (Exception e) when (e is NpgsqlException or OperationCanceledException)
-        { Ready = false; lifetime.StopApplication(); throw; }
+        { AgentTelemetry.TaskFinished(activity, "FAILED", Stopwatch.GetElapsedTime(started).TotalSeconds); Ready = false; lifetime.StopApplication(); throw; }
+        AgentTelemetry.TaskFinished(activity, result.Status.ToString(), Stopwatch.GetElapsedTime(started).TotalSeconds);
         logger.LogInformation("Task {TaskId} finished", task.TaskId);
     }
 

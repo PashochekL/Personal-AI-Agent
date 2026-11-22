@@ -136,6 +136,10 @@ case "${1:-run}" in
     trap cleanup EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
+    damir_otel_endpoint=${DAMIR_OTEL_ENDPOINT:-}
+    if [ "${DAMIR_OBSERVABILITY_ENABLED:-0}" = 1 ] && [ "${damir_otel_endpoint%/}" = 'http://otel-collector:4318' ]; then
+      docker compose --profile observability up -d otel-collector
+    fi
     docker compose build web-search
     docker compose up -d --wait gateway postgres web-search
     docker compose up -d --wait redis
