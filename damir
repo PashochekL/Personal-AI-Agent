@@ -44,7 +44,12 @@ case "${1:-run}" in
     docker compose run --rm --no-deps --user 0 --entrypoint python gateway -c 'import os; os.chown("/tokens/chatgpt", 65532, 65532); os.chmod("/tokens/chatgpt", 0o700)'
     exec docker compose run --rm --no-deps --entrypoint python gateway -u -c 'from litellm.llms.chatgpt.authenticator import Authenticator; Authenticator().get_access_token(); print("Вход завершён. Сессия сохранена в отдельном томе Дамира.")'
     ;;
-  run|backend)
+  run|backend|telegram|telegram-drain)
+    if [ "${1:-run}" = telegram ] || [ "${1:-run}" = telegram-drain ]; then
+      if [ "$#" -gt 2 ]; then printf '%s\n' 'Использование: damir telegram [--configure]' >&2; exit 2; fi
+      . "$project_dir/scripts/telegram-settings.sh"
+      damir_configure_telegram "$1" "${2:-}"
+    fi
     COMPOSE_PROGRESS=quiet
     COMPOSE_IGNORE_ORPHANS=true
     export COMPOSE_PROGRESS COMPOSE_IGNORE_ORPHANS
@@ -72,7 +77,7 @@ case "${1:-run}" in
       git credential-osxkeychain "$1"
     }
     github_key() { printf 'protocol=https\nhost=damir-github.local\nusername=damir\n\n'; }
-    if [ -z "${DAMIR_GITHUB_TOKEN:-}" ] && [ "$(uname -s)" = Darwin ]; then
+    if [ "${1:-run}" != telegram ] && [ -z "${DAMIR_GITHUB_TOKEN:-}" ] && [ "$(uname -s)" = Darwin ]; then
       DAMIR_GITHUB_TOKEN=$(github_key | github_credentials get 2>/dev/null | sed -n 's/^password=//p')
     fi
     DAMIR_GITHUB_MCP=0
@@ -106,6 +111,9 @@ case "${1:-run}" in
         docker compose exec -T embeddings ollama pull embeddinggemma:300m
       fi
     fi
+    if [ "${1:-run}" = telegram ]; then
+      if sh scripts/telegram-isolated.sh; then exit 0; else exit $?; fi
+    fi
     docker compose build shell-sandbox
     sandbox_id=$(docker compose run -d --rm --no-deps shell-sandbox)
     if [ "$DAMIR_GITHUB_MCP" = 1 ]; then
@@ -118,10 +126,14 @@ case "${1:-run}" in
     fi
     while :; do
       backend_name="damir-backend-${DAMIR_SANDBOX_VOLUME#damir-ipc-}"
-      backend_id=$(docker compose run -d --rm --no-deps --build --name "$backend_name" backend)
+      if [ "${1:-run}" = telegram-drain ]; then
+        backend_id=$(docker compose run -d --rm --no-deps --build --name "$backend_name" --service-ports backend)
+      else backend_id=$(docker compose run -d --rm --no-deps --build --name "$backend_name" backend); fi
       DAMIR_CLI_BACKEND_URL="http://$backend_name:8080"
       export DAMIR_CLI_BACKEND_URL
-      if docker compose run --no-deps --rm --build cli; then result=0; else result=$?; fi
+      client=cli
+      if [ "${1:-run}" = telegram-drain ]; then client=telegram-legacy; fi
+      if docker compose run --no-deps --rm --build "$client"; then result=0; else result=$?; fi
       docker stop --time 40 "$backend_id" >/dev/null
       backend_id=
       case "$result" in
@@ -169,7 +181,7 @@ case "${1:-run}" in
     done
     ;;
   *)
-    printf '%s\n' 'Использование: damir [login|auth-check|run|backend]' >&2
+    printf '%s\n' 'Использование: damir [login|auth-check|run|backend|telegram|telegram-drain]' >&2
     exit 2
     ;;
 esac

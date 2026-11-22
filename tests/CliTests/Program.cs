@@ -1,7 +1,7 @@
 using System.Net;
 using System.Text;
 using System.Text.Json;
-using AiAgent.Cli;
+using AiAgent.Http;
 using AiAgent.Shared;
 using TaskStatus = AiAgent.Shared.TaskStatus;
 

@@ -10,5 +10,6 @@
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <ProjectReference Include="../../src/ai_agent/interfaces/api/Api.csproj" />
     <ProjectReference Include="../../src/ai_agent/interfaces/cli/Cli.csproj" />
+    <ProjectReference Include="../../src/ai_agent/interfaces/telegram/Telegram.csproj" />
   </ItemGroup>
 </Project>

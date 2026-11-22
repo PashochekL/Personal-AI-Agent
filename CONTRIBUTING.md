@@ -63,7 +63,9 @@ git switch --track -c develop origin/develop
    При изменении ядра или памяти также запустите `dotnet run --project tests/CoreTests/CoreTests.csproj`
    и `dotnet run --project tests/MemoryTests/MemoryTests.csproj`.
    HTTP-клиент проверяется командой `dotnet run --project tests/CliTests/CliTests.csproj`.
-   Интеграция процесса CLI с backend: `pwsh -NoProfile -File tests/BackendTests/run-integration.ps1`.
+   Telegram-клиент: `dotnet run --project tests/TelegramTests/TelegramTests.csproj`.
+   Интеграция CLI и Telegram с backend: `pwsh -NoProfile -File tests/BackendTests/run-integration.ps1`.
+   Изоляция файлов и shell аккаунтов в Docker: `pwsh -NoProfile -File tests/TelegramTests/run-isolation-smoke.ps1`.
    Полный автономный набор в Linux: `docker build -f docker/Dockerfile.tests -t personal-ai-agent-tests .`.
    Проверки памяти с настоящей БД описаны в [SANDBOX.md](docs/SANDBOX.md#долговременная-память).
 4. Проверьте `git diff --check` и `git status`: секретов и локальных данных быть не должно.

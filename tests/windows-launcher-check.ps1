@@ -11,6 +11,9 @@ $oldSession = $env:DAMIR_SESSION_ID
 $oldMemoryProject = $env:DAMIR_MEMORY_PROJECT
 $oldMemoryEnabled = $env:DAMIR_MEMORY_ENABLED
 $oldGithubToken = $env:DAMIR_GITHUB_TOKEN
+$oldTelegramToken = $env:TELEGRAM_BOT_TOKEN
+$oldTelegramUser = $env:TELEGRAM_ALLOWED_USER_ID
+$oldTelegramUsers = $env:TELEGRAM_ALLOWED_USER_IDS
 $pwsh = (Get-Command pwsh -CommandType Application).Source | Select-Object -First 1
 try {
     $fakeBin = Join-Path $fixtureDir 'bin'
@@ -20,6 +23,8 @@ try {
     Copy-Item -LiteralPath (Join-Path $repoDir 'damir-launcher.ps1') -Destination $fixtureDir
     Copy-Item -LiteralPath (Join-Path $repoDir 'damir.cmd') -Destination $fixtureDir
     Copy-Item -LiteralPath (Join-Path $repoDir 'damir') -Destination $fixtureDir
+    [IO.Directory]::CreateDirectory((Join-Path $fixtureDir 'scripts')) | Out-Null
+    Copy-Item -LiteralPath (Join-Path $repoDir 'scripts/telegram-isolated.ps1') -Destination (Join-Path $fixtureDir 'scripts')
     [IO.File]::WriteAllText((Join-Path $configDir 'litellm.yaml'), 'model_list: []')
     $env:DAMIR_TEST_LOG = Join-Path $fixtureDir 'calls.log'
     $env:DAMIR_TEST_WORKSPACE_LOG = Join-Path $fixtureDir 'workspace.log'
@@ -27,6 +32,7 @@ try {
     $env:DAMIR_MEMORY_PROJECT = ''
     $env:DAMIR_MEMORY_ENABLED = '1'
     $env:DAMIR_GITHUB_TOKEN = ''
+    $env:TELEGRAM_ALLOWED_USER_IDS = ''
     $env:DAMIR_TIMEZONE = 'Asia/Tomsk'
     if ($IsWindows) {
         $fakeDocker = Join-Path $fakeBin 'docker.cmd'
@@ -104,6 +110,97 @@ exit 0
         -not $backendCalls.Contains('compose run --no-deps --rm --build --service-ports backend')) { throw 'Backend launch sequence or secret handling failed.' }
     $backendOutput = (& $pwsh -NoLogo -NoProfile -File $launcher backend 2>&1 | Out-String)
     if ($LASTEXITCODE -ne 0 -or [IO.File]::ReadAllText($backendKeyPath).Trim() -ne $backendKey) { throw 'Backend key was not reused.' }
+    $env:TELEGRAM_BOT_TOKEN = '123456:synthetic_token_not_a_real_secret'
+    $env:TELEGRAM_ALLOWED_USER_ID = '900001'
+    $env:TELEGRAM_ALLOWED_USER_IDS = '900001, 900002,900001'
+    [IO.File]::WriteAllText($env:DAMIR_TEST_LOG, '')
+    $telegramOutput = (& $pwsh -NoLogo -NoProfile -File $launcher telegram 2>&1 | Out-String)
+    if ($LASTEXITCODE -ne 0) { throw 'Telegram launcher failed.' }
+    $telegramCalls = [IO.File]::ReadAllText($env:DAMIR_TEST_LOG)
+    if ($telegramCalls -notmatch 'compose run --no-deps --rm --name damir-tg-router-[a-f0-9]+ telegram' -or
+        $telegramCalls -notmatch '--name damir-tg-[a-f0-9]+-900001 telegram-backend' -or
+        $telegramCalls -notmatch '--name damir-tg-[a-f0-9]+-900002 telegram-backend' -or
+        $telegramCalls.Contains('--service-ports') -or $telegramCalls.Contains('volume rm damir-tg-data-') -or
+        $telegramCalls.Contains('volume rm damir_telegram_state') -or $telegramOutput.Contains($env:TELEGRAM_BOT_TOKEN)) { throw 'Telegram launch or secret handling failed.' }
+    $keyFiles = @(Get-ChildItem -LiteralPath (Join-Path $fixtureDir '.uv-cache/telegram-keys') -File)
+    $profileKeys = @($keyFiles | ForEach-Object { [IO.File]::ReadAllText($_.FullName).Trim() })
+    if ($profileKeys.Count -ne 2 -or @($profileKeys | Select-Object -Unique).Count -ne 2) { throw 'Account keys are not isolated.' }
+    foreach ($profileKey in $profileKeys) { if ($telegramOutput.Contains($profileKey) -or $telegramCalls.Contains($profileKey)) { throw 'Account key was exposed.' } }
+    $tokenPath = Join-Path $fixtureDir '.uv-cache/telegram-token.dpapi'
+    if ([IO.File]::Exists($tokenPath)) { throw 'An environment token must not be persisted implicitly.' }
+    $telegramHarness = Join-Path $fixtureDir 'telegram-input-check.ps1'
+    $harness = @'
+param([switch] $ConfigureTelegram, [switch] $ExpectPrompts,
+    [string] $TestCommand = 'telegram', [string] $SetupIds = '900003',
+    [string] $SetupToken = '654321:synthetic_token_not_a_real_secret')
+$ErrorActionPreference = 'Stop'
+function Read-Host([string] $Prompt, [switch] $AsSecureString) {
+    if (-not $ExpectPrompts) { throw 'Saved settings unexpectedly prompted for input.' }
+    if ($AsSecureString) {
+        Add-Content -LiteralPath (Join-Path $PSScriptRoot 'prompts.log') -Value 'token'
+        return ConvertTo-SecureString $SetupToken -AsPlainText -Force
+    }
+    Add-Content -LiteralPath (Join-Path $PSScriptRoot 'prompts.log') -Value 'ids'
+    return $SetupIds
+}
+& (Join-Path $PSScriptRoot 'damir-launcher.ps1') $TestCommand -ConfigureTelegram:$ConfigureTelegram
+exit $LASTEXITCODE
+'@
+    [IO.File]::WriteAllText($telegramHarness, $harness, [Text.UTF8Encoding]::new($false))
+    $env:TELEGRAM_ALLOWED_USER_ID = ''
+    $env:TELEGRAM_ALLOWED_USER_IDS = ''
+    $savedIdsOutput = (& $pwsh -NoLogo -NoProfile -File $telegramHarness 2>&1 | Out-String)
+    if ($LASTEXITCODE -ne 0 -or $savedIdsOutput.Contains($env:TELEGRAM_BOT_TOKEN)) { throw 'Saved Telegram IDs were not reused without prompting.' }
+    if ($IsWindows) {
+        $env:TELEGRAM_BOT_TOKEN = ''
+        $firstSetup = (& $pwsh -NoLogo -NoProfile -File $telegramHarness -ExpectPrompts 2>&1 | Out-String)
+        if ($LASTEXITCODE -ne 0) { throw "First Telegram setup failed: $firstSetup" }
+        $syntheticToken = '654321:synthetic_token_not_a_real_secret'
+        $encryptedToken = [IO.File]::ReadAllText($tokenPath)
+        $secureToken = ConvertTo-SecureString $encryptedToken
+        try { $decryptedToken = [System.Net.NetworkCredential]::new('', $secureToken).Password }
+        finally { $secureToken.Dispose() }
+        $promptsPath = Join-Path $fixtureDir 'prompts.log'
+        if ($decryptedToken -cne $syntheticToken -or $encryptedToken.Contains($syntheticToken) -or $firstSetup.Contains($syntheticToken) -or
+            ([IO.File]::ReadAllLines($promptsPath) -join ',') -ne 'token,ids') { throw 'Telegram token encryption or initial prompts failed.' }
+        [IO.File]::WriteAllText($env:DAMIR_TEST_LOG, '')
+        $repeatSetup = (& $pwsh -NoLogo -NoProfile -File $telegramHarness 2>&1 | Out-String)
+        if ($LASTEXITCODE -ne 0 -or $repeatSetup.Contains($syntheticToken) -or
+            [IO.File]::ReadAllText($env:DAMIR_TEST_LOG) -notmatch '--name damir-tg-[a-f0-9]+-900003 telegram-backend') { throw 'Telegram restart did not reuse the encrypted token and IDs.' }
+        $env:TELEGRAM_BOT_TOKEN = '123456:synthetic_token_not_a_real_secret'
+        $env:TELEGRAM_ALLOWED_USER_IDS = '900001'
+        $reconfigure = (& $pwsh -NoLogo -NoProfile -File $telegramHarness -ConfigureTelegram -ExpectPrompts -SetupIds '900004' 2>&1 | Out-String)
+        if ($LASTEXITCODE -ne 0 -or [IO.File]::ReadAllText((Join-Path $fixtureDir '.uv-cache/telegram-users-654321.txt')).Trim() -ne '900004' -or
+            ([IO.File]::ReadAllLines($promptsPath) -join ',') -ne 'token,ids,token,ids') { throw 'Explicit Telegram setup did not override environment values.' }
+        $encryptedToken = [IO.File]::ReadAllText($tokenPath)
+        $env:TELEGRAM_BOT_TOKEN = ''
+        $env:TELEGRAM_ALLOWED_USER_IDS = ''
+        $invalidSetup = (& $pwsh -NoLogo -NoProfile -File $telegramHarness -ConfigureTelegram -ExpectPrompts -SetupToken 'invalid' 2>&1 | Out-String)
+        if ($LASTEXITCODE -eq 0 -or [IO.File]::ReadAllText($tokenPath) -ne $encryptedToken -or
+            $invalidSetup.Contains('synthetic_token_not_a_real_secret')) { throw 'Invalid replacement token changed saved credentials or leaked a token.' }
+        $invalidIds = (& $pwsh -NoLogo -NoProfile -File $telegramHarness -ConfigureTelegram -ExpectPrompts -SetupIds 'invalid' 2>&1 | Out-String)
+        if ($LASTEXITCODE -eq 0 -or [IO.File]::ReadAllText($tokenPath) -ne $encryptedToken -or
+            [IO.File]::ReadAllText((Join-Path $fixtureDir '.uv-cache/telegram-users-654321.txt')).Trim() -ne '900004') { throw 'Invalid Telegram IDs changed saved settings.' }
+        [IO.File]::WriteAllText($tokenPath, 'corrupt-dpapi-data')
+        [IO.File]::WriteAllText($env:DAMIR_TEST_LOG, '')
+        $corruptOutput = (& $pwsh -NoLogo -NoProfile -File $telegramHarness 2>&1 | Out-String)
+        if ($LASTEXITCODE -eq 0 -or -not $corruptOutput.Contains('-ConfigureTelegram') -or
+            [IO.File]::ReadAllText($env:DAMIR_TEST_LOG).Length -ne 0) { throw 'Unreadable saved Telegram token did not stop before Docker with a recovery hint.' }
+        $env:TELEGRAM_BOT_TOKEN = '123456:synthetic_token_not_a_real_secret'
+        $overrideOutput = (& $pwsh -NoLogo -NoProfile -File $telegramHarness 2>&1 | Out-String)
+        if ($LASTEXITCODE -ne 0) { throw 'Environment token did not take precedence over saved credentials.' }
+        $recoverOutput = (& $pwsh -NoLogo -NoProfile -File $telegramHarness -ConfigureTelegram -ExpectPrompts 2>&1 | Out-String)
+        if ($LASTEXITCODE -ne 0) { throw 'Explicit setup did not recover from an unreadable token file.' }
+        [IO.File]::WriteAllText($env:DAMIR_TEST_LOG, '')
+        $drainOutput = (& $pwsh -NoLogo -NoProfile -File $telegramHarness -TestCommand 'telegram-drain' 2>&1 | Out-String)
+        if ($LASTEXITCODE -eq 0 -or [IO.File]::ReadAllText($env:DAMIR_TEST_LOG).Length -ne 0) { throw 'Legacy drain must still explicitly ask for its previous owner ID.' }
+    }
+    $env:TELEGRAM_BOT_TOKEN = '123456:synthetic_token_not_a_real_secret'
+    [IO.File]::WriteAllText($env:DAMIR_TEST_LOG, '')
+    $env:TELEGRAM_ALLOWED_USER_ID = '0'
+    $env:TELEGRAM_ALLOWED_USER_IDS = '900001,invalid'
+    $null = & $pwsh -NoLogo -NoProfile -File $launcher telegram 2>&1
+    if ($LASTEXITCODE -eq 0 -or [IO.File]::ReadAllLines($env:DAMIR_TEST_LOG).Count -ne 0) { throw 'Invalid Telegram owner did not stop launch before Docker.' }
     [IO.File]::WriteAllText($env:DAMIR_TEST_WORKSPACE_LOG, '')
     Push-Location -LiteralPath $todo
     try { $null = & $pwsh -NoLogo -NoProfile -File $launcher } finally { Pop-Location }
@@ -154,5 +251,8 @@ exit 0
     $env:DAMIR_MEMORY_PROJECT = $oldMemoryProject
     $env:DAMIR_MEMORY_ENABLED = $oldMemoryEnabled
     $env:DAMIR_GITHUB_TOKEN = $oldGithubToken
+    $env:TELEGRAM_BOT_TOKEN = $oldTelegramToken
+    $env:TELEGRAM_ALLOWED_USER_ID = $oldTelegramUser
+    $env:TELEGRAM_ALLOWED_USER_IDS = $oldTelegramUsers
     if ([IO.Directory]::Exists($fixtureDir)) { [IO.Directory]::Delete($fixtureDir, $true) }
 }

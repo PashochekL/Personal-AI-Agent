@@ -1,14 +1,19 @@
 ﻿#requires -Version 7.0
 param(
-    [ValidateSet('auth-check', 'login', 'run', 'backend')]
-    [string] $Command = 'run'
+    [ValidateSet('auth-check', 'login', 'run', 'backend', 'telegram', 'telegram-drain')]
+    [string] $Command = 'run',
+    [switch] $ConfigureTelegram
 )
 
 $ErrorActionPreference = 'Stop'
+if ($ConfigureTelegram -and $Command -ne 'telegram') {
+    throw 'Для изменения настроек используй damir telegram -ConfigureTelegram.'
+}
 $projectDir = $PSScriptRoot
 $invocationDir = (Get-Location).ProviderPath
 $changedEnvironment = @('DAMIR_CLI_BACKEND_URL', 'DAMIR_BACKEND_API_KEY', 'DAMIR_TIMEZONE', 'DAMIR_GATEWAY_CONFIG_REV', 'LITELLM_MASTER_KEY', 'DAMIR_POSTGRES_PASSWORD', 'DAMIR_WORKSPACE', 'DAMIR_SESSION_ID', 'DAMIR_MEMORY_PROJECT', 'DAMIR_SANDBOX_VOLUME', 'DAMIR_MCP_VOLUME', 'DAMIR_GITHUB_MCP', 'DAMIR_GITHUB_TOKEN', 'GCM_CREDENTIAL_STORE', 'GCM_INTERACTIVE', 'COMPOSE_PROGRESS', 'COMPOSE_IGNORE_ORPHANS')
 $previousEnvironment = @{}
+$changedEnvironment += @('TELEGRAM_BOT_TOKEN', 'TELEGRAM_ALLOWED_USER_ID', 'TELEGRAM_ALLOWED_USER_IDS')
 foreach ($name in $changedEnvironment) {
     $previousEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
 }
@@ -69,7 +74,55 @@ try {
             & docker compose run --rm --no-deps --entrypoint python gateway -u -c "from litellm.llms.chatgpt.authenticator import Authenticator; Authenticator().get_access_token(); print('Вход завершён. Сессия сохранена в отдельном томе Дамира.')"
             exit $LASTEXITCODE
         }
-        { $_ -in 'run', 'backend' } {
+        { $_ -in 'run', 'backend', 'telegram', 'telegram-drain' } {
+            if ($Command -in 'telegram', 'telegram-drain') {
+                $telegramTokenFile = Join-Path $stateDir 'telegram-token.dpapi'
+                $encryptedTelegramToken = $null
+                if ($ConfigureTelegram -or [string]::IsNullOrWhiteSpace($env:TELEGRAM_BOT_TOKEN)) {
+                    $secret = $null
+                    try {
+                        if (-not $ConfigureTelegram -and $IsWindows -and [IO.File]::Exists($telegramTokenFile)) {
+                            try { $secret = ConvertTo-SecureString ([IO.File]::ReadAllText($telegramTokenFile).Trim()) -ErrorAction Stop }
+                            catch { throw 'Не удалось расшифровать сохранённый токен. Выполни damir telegram -ConfigureTelegram.' }
+                        } else {
+                            $secret = Read-Host 'Токен Telegram-бота от BotFather (ввод скрыт)' -AsSecureString
+                            # Without a key PowerShell uses Windows DPAPI, bound to this user and machine.
+                            # On other platforms ConvertFrom-SecureString would not encrypt the token.
+                            if ($IsWindows -and $Command -eq 'telegram') { $encryptedTelegramToken = ConvertFrom-SecureString $secret }
+                        }
+                        $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secret)
+                        try { $env:TELEGRAM_BOT_TOKEN = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr) }
+                        finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr) }
+                    } finally { if ($null -ne $secret) { $secret.Dispose() } }
+                }
+                if ($env:TELEGRAM_BOT_TOKEN -notmatch '^[0-9]{1,20}:[A-Za-z0-9_-]{16,235}$') { throw 'Некорректный токен Telegram-бота.' }
+                $telegramBotNumber = ([long]($env:TELEGRAM_BOT_TOKEN.Split(':')[0])).ToString()
+                $usersFile = Join-Path $stateDir "telegram-users-$telegramBotNumber.txt"
+                $rawIds = if (-not [string]::IsNullOrWhiteSpace($env:TELEGRAM_ALLOWED_USER_IDS)) { $env:TELEGRAM_ALLOWED_USER_IDS } else { $env:TELEGRAM_ALLOWED_USER_ID }
+                if ($ConfigureTelegram -or [string]::IsNullOrWhiteSpace($rawIds)) {
+                    $savedIds = if ($Command -eq 'telegram' -and [IO.File]::Exists($usersFile)) { [IO.File]::ReadAllText($usersFile).Trim() } else { '' }
+                    if (-not $ConfigureTelegram -and -not [string]::IsNullOrWhiteSpace($savedIds)) {
+                        $rawIds = $savedIds
+                    } else {
+                        $rawIds = Read-Host 'Разрешённые Telegram ID через запятую (Enter — сохранённый список, если есть)'
+                        if ([string]::IsNullOrWhiteSpace($rawIds)) { $rawIds = $savedIds }
+                    }
+                }
+                $ids = [Collections.Generic.List[long]]::new()
+                if ($rawIds.Split(',').Count -gt 32) { throw 'Допускается не больше 32 Telegram ID.' }
+                foreach ($part in $rawIds.Split(',')) {
+                    $idText = $part.Trim(); $telegramUser = 0L
+                    if ($idText -notmatch '^[0-9]+$' -or -not [long]::TryParse($idText, [ref]$telegramUser) -or $telegramUser -le 0) { throw 'Нужны положительные числовые Telegram ID через запятую.' }
+                    if (-not $ids.Contains($telegramUser)) { $ids.Add($telegramUser) }
+                }
+                $env:TELEGRAM_ALLOWED_USER_IDS = $ids -join ','
+                $env:TELEGRAM_ALLOWED_USER_ID = if ($ids.Count -eq 1) { $ids[0].ToString() } else { '' }
+                if ($Command -eq 'telegram-drain' -and $ids.Count -ne 1) { throw 'Для старых отправок укажи один прежний ID.' }
+                if ($Command -eq 'telegram') { [IO.File]::WriteAllText($usersFile, $env:TELEGRAM_ALLOWED_USER_IDS + "`n", [Text.UTF8Encoding]::new($false)) }
+                if ($null -ne $encryptedTelegramToken) {
+                    [IO.File]::WriteAllText($telegramTokenFile, $encryptedTelegramToken, [Text.UTF8Encoding]::new($false))
+                }
+            }
             $env:COMPOSE_PROGRESS = 'quiet'
             $env:COMPOSE_IGNORE_ORPHANS = 'true'
             if ([string]::Equals($invocationDir.TrimEnd([IO.Path]::DirectorySeparatorChar), $projectDir.TrimEnd([IO.Path]::DirectorySeparatorChar), [StringComparison]::OrdinalIgnoreCase)) {
@@ -91,7 +144,7 @@ try {
                 $env:DAMIR_MEMORY_PROJECT = 'workspace-' + [BitConverter]::ToString($memoryBytes).Replace('-', '').ToLowerInvariant()
             }
             $env:DAMIR_MCP_VOLUME = 'damir-mcp-' + [Guid]::NewGuid().ToString('N')
-            if ([string]::IsNullOrWhiteSpace($env:DAMIR_GITHUB_TOKEN)) {
+            if ($Command -ne 'telegram' -and [string]::IsNullOrWhiteSpace($env:DAMIR_GITHUB_TOKEN)) {
                 try {
                     $saved = $githubKey | & git credential-manager get 2>$null
                     if ($LASTEXITCODE -eq 0) {
@@ -123,6 +176,11 @@ try {
                         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
                     }
                 }
+                if ($Command -eq 'telegram') {
+                    . (Join-Path $projectDir 'scripts/telegram-isolated.ps1')
+                    $telegramExit = Invoke-DamirIsolatedTelegram -StateRoot $stateDir
+                    exit $telegramExit
+                }
                 & docker compose build shell-sandbox
                 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
                 $sandboxId = (& docker compose run -d --rm --no-deps shell-sandbox | Select-Object -Last 1)
@@ -140,10 +198,15 @@ try {
                 }
                 while ($true) {
                     $backendName = 'damir-backend-' + $env:DAMIR_SANDBOX_VOLUME.Substring('damir-ipc-'.Length)
-                    $backendId = (& docker compose run -d --rm --no-deps --build --name $backendName backend | Select-Object -Last 1)
+                    $backendArguments = @('compose', 'run', '-d', '--rm', '--no-deps', '--build', '--name', $backendName)
+                    if ($Command -eq 'telegram-drain') { $backendArguments += '--service-ports' }
+                    $backendId = (& docker @backendArguments backend | Select-Object -Last 1)
                     if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($backendId)) { throw 'Не удалось запустить backend.' }
                     $env:DAMIR_CLI_BACKEND_URL = "http://${backendName}:8080"
-                    & docker compose run --no-deps --rm --build cli
+                    if ($Command -eq 'telegram-drain') {
+                        Write-Host 'Завершаю только старые отправки прежнему владельцу. Новые сообщения не принимаются.'
+                        & docker compose run --no-deps --rm --build telegram-legacy
+                    } else { & docker compose run --no-deps --rm --build cli }
                     $agentExit = $LASTEXITCODE
                     & docker stop --time 40 $backendId 2>$null | Out-Null
                     if ($LASTEXITCODE -ne 0) { throw 'Не удалось остановить backend.' }
